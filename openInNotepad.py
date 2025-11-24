@@ -8,8 +8,44 @@ from tkinter.scrolledtext import ScrolledText
 NOTEPADPP_PATH = r"C:\Program Files\Notepad++\notepad++.exe"
 
 
+def resolve_full_path(base_path, path_str):
+    """
+    Build a full path from base_path and a user-entered path.
+
+    - Drive-letter paths (C:\..., D:\...) and UNC paths (\\server\share\...)
+      are treated as absolute.
+    - On Windows, paths that start with a single slash or backslash are treated
+      as *relative* to base_path, to be forgiving of extra/missing separators.
+    - On non-Windows systems, paths that start with '/' are treated as absolute.
+    """
+    if path_str is None:
+        return None
+
+    path_str = path_str.strip().strip('"')
+    if not path_str:
+        return None
+
+    # Normalize separators
+    path_str = path_str.replace("/", os.sep).replace("\\", os.sep)
+
+    drive, _ = os.path.splitdrive(path_str)
+    is_unc = path_str.startswith(os.sep * 2)
+
+    # Truly absolute path:
+    if drive or is_unc or (os.name != "nt" and path_str.startswith(os.sep)):
+        return os.path.normpath(path_str)
+
+    # Relative or "almost absolute" -> join with base if provided
+    if base_path:
+        # Avoid dropping base_path if user started with a separator
+        relative = path_str.lstrip("/\\")
+        return os.path.normpath(os.path.join(base_path, relative))
+
+    return os.path.normpath(path_str)
+
+
 def open_files():
-    base_path = base_entry.get().strip()
+    base_path = base_entry.get().strip().strip('"')
     if base_path:
         base_path = os.path.normpath(base_path)
 
@@ -37,19 +73,57 @@ def open_files():
     missing_files = []
 
     for p in cleaned_paths:
-        # If path is absolute, use as-is; otherwise join with base path (if any)
-        if os.path.isabs(p) or not base_path:
-            full_path = os.path.normpath(p)
-        else:
-            full_path = os.path.normpath(os.path.join(base_path, p))
+        full_path = resolve_full_path(base_path, p)
+        if not full_path:
+            continue
 
         if os.path.isfile(full_path):
             files_to_open.append(full_path)
         else:
             missing_files.append(full_path)
 
+    creation_errors = []
+
+    if missing_files:
+        create = messagebox.askyesno(
+            "Create missing files?",
+            "These files do not exist:\n\n"
+            + "\n".join(missing_files)
+            + "\n\nCreate them as empty files?"
+        )
+        if create:
+            for path in missing_files:
+                try:
+                    dir_name = os.path.dirname(path)
+                    if dir_name and not os.path.isdir(dir_name):
+                        os.makedirs(dir_name, exist_ok=True)
+
+                    # Create empty file (or leave existing content untouched)
+                    if not os.path.exists(path):
+                        with open(path, "w", encoding="utf-8"):
+                            pass
+
+                    files_to_open.append(path)
+                except Exception as e:
+                    creation_errors.append(f"{path} -> {e}")
+            if creation_errors:
+                messagebox.showerror(
+                    "Error creating some files",
+                    "Some files could not be created:\n\n" + "\n".join(creation_errors)
+                )
+        else:
+            # User chose not to create missing files, just inform which are missing
+            messagebox.showwarning(
+                "Some files missing",
+                "These files could not be found and were not created:\n\n"
+                + "\n".join(missing_files)
+            )
+
     if not files_to_open:
-        messagebox.showerror("No valid files", "None of the given paths point to existing files.")
+        messagebox.showerror(
+            "No files to open",
+            "No existing or newly created files to open."
+        )
         return
 
     # Check Notepad++ path
@@ -67,12 +141,6 @@ def open_files():
     except Exception as e:
         messagebox.showerror("Error launching Notepad++", str(e))
         return
-
-    if missing_files:
-        messagebox.showwarning(
-            "Some files missing",
-            "These files could not be found:\n\n" + "\n".join(missing_files)
-        )
 
 
 def main():
