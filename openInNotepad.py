@@ -69,7 +69,8 @@ def open_files():
         if not answer:
             return
 
-    files_to_open = []
+    # Keep all resolved paths in original order
+    ordered_paths = []
     missing_files = []
 
     for p in cleaned_paths:
@@ -77,9 +78,9 @@ def open_files():
         if not full_path:
             continue
 
-        if os.path.isfile(full_path):
-            files_to_open.append(full_path)
-        else:
+        ordered_paths.append(full_path)
+
+        if not os.path.isfile(full_path):
             missing_files.append(full_path)
 
     creation_errors = []
@@ -102,10 +103,9 @@ def open_files():
                     if not os.path.exists(path):
                         with open(path, "w", encoding="utf-8"):
                             pass
-
-                    files_to_open.append(path)
                 except Exception as e:
                     creation_errors.append(f"{path} -> {e}")
+
             if creation_errors:
                 messagebox.showerror(
                     "Error creating some files",
@@ -118,6 +118,9 @@ def open_files():
                 "These files could not be found and were not created:\n\n"
                 + "\n".join(missing_files)
             )
+
+    # Build final list in the original order, only including files that now exist
+    files_to_open = [p for p in ordered_paths if os.path.isfile(p)]
 
     if not files_to_open:
         messagebox.showerror(
@@ -136,7 +139,7 @@ def open_files():
         return
 
     try:
-        # Open all files in Notepad++ as tabs, in order
+        # Open all files in Notepad++ as tabs, in the original list order
         subprocess.Popen([NOTEPADPP_PATH] + files_to_open)
     except Exception as e:
         messagebox.showerror("Error launching Notepad++", str(e))
