@@ -1,7 +1,6 @@
 import os
 import sys
 import fnmatch
-import math
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
 from pathlib import Path
@@ -14,15 +13,12 @@ import threading
 # --------------------------------------------------------------------
 
 class DumpWorker:
-    def __init__(self, root_dir: Path, output_dir: Path, top_n_count: int, 
-                 ignore_txt: bool, ignore_md: bool, only_md: bool, log_callback):
+    def __init__(self, root_dir: Path, output_dir: Path, top_n_count: int, log_callback):
         self.root_dir = root_dir
         self.output_dir = output_dir
         self.top_n_count = top_n_count
-        self.ignore_txt = ignore_txt
-        self.ignore_md = ignore_md
-        self.only_md = only_md
         self.log = log_callback
+        self.stop_event = threading.Event()
         
         # Standard Exclusions
         self.ALWAYS_IGNORE_DIRS = {
@@ -54,6 +50,7 @@ class DumpWorker:
 
     def match_ignore(self, name: str, patterns: list) -> bool:
         for pat in patterns:
+            # Simple matching for standard gitignore patterns
             if fnmatch.fnmatch(name, pat.rstrip("/")):
                 return True
         return False
@@ -71,31 +68,22 @@ class DumpWorker:
         self.log("Scanning directories...")
         
         for dirpath, dirnames, filenames in os.walk(self.root_dir, followlinks=True):
-            # Prune directories
+            # Prune directories (in-place)
             dirnames[:] = [d for d in dirnames 
                            if d not in self.ALWAYS_IGNORE_DIRS 
                            and not self.match_ignore(d, git_patterns)]
             
             for f in filenames:
                 fpath = Path(dirpath) / f
-                ext = fpath.suffix.lower()
-
-                # 1. Global binary/junk exclusions
-                if ext in self.ALWAYS_IGNORE_EXT: continue
+                if fpath.suffix.lower() in self.ALWAYS_IGNORE_EXT: continue
                 if self.match_ignore(f, git_patterns): continue
                 
-                # 2. Specific Format Logic
-                if self.only_md:
-                    if ext != ".md": continue
-                else:
-                    if self.ignore_txt and ext == ".txt": continue
-                    if self.ignore_md and ext == ".md": continue
-
                 valid_files.append(fpath)
                 
         return valid_files
 
     def write_dump_file(self, filename: str, files: List[Path], title: str) -> str:
+        """Writes the dump and returns a summary string for the master index."""
         if not files:
             return ""
 
@@ -106,6 +94,7 @@ class DumpWorker:
 
         with out_path.open("w", encoding="utf-8") as out:
             out.write(f"===== {title} =====\n")
+            out.write(f"Source: {self.root_dir}\n")
             out.write(f"Generated: {datetime.now()}\n")
             out.write(f"Files: {total_files}\n")
             out.write(f"Total Size: {size_mb:.2f} MB\n\n")
@@ -124,8 +113,9 @@ class DumpWorker:
                 except Exception as e:
                     out.write(f"[Error reading file: {e}]\n")
         
-        self.log(f"-> Created {filename} ({total_files} files)")
+        self.log(f"-> Created {filename} ({total_files} files, {size_mb:.2f} MB)")
         
+        # Return summary for Master Index
         return (f"FILE: {filename}\n"
                 f"CONTENT: {title}\n"
                 f"STATS: {total_files} files, {size_mb:.2f} MB\n"
@@ -135,109 +125,77 @@ class DumpWorker:
         try:
             self.log(f"Starting process for: {self.root_dir}")
             
-            # Setup Output
+            # 1. Setup Output
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            mode_suffix = "_MD_ONLY" if self.only_md else ""
-            self.output_dir = self.output_dir / f"smart_dump_{ts}{mode_suffix}"
+            self.output_dir = self.output_dir / f"smart_dump_{ts}"
             self.output_dir.mkdir(parents=True, exist_ok=True)
-            self.log(f"Output folder: {self.output_dir}")
+            self.log(f"Output folder created: {self.output_dir}")
 
-            # Collect
+            # 2. Collect
             all_files = self.collect_files()
             self.log(f"Found {len(all_files)} total valid files.")
+
+            # 3. Group
+            root_files = []
+            folder_groups: Dict[str, List[Path]] = {}
+
+            for f in all_files:
+                rel = f.relative_to(self.root_dir)
+                parts = rel.parts
+                if len(parts) == 1:
+                    root_files.append(f)
+                else:
+                    top = parts[0]
+                    if top not in folder_groups: folder_groups[top] = []
+                    folder_groups[top].append(f)
+
+            # 4. Rank
+            ranked = []
+            for name, f_list in folder_groups.items():
+                size = sum(self.get_file_size(f) for f in f_list)
+                ranked.append((name, size, f_list))
+            ranked.sort(key=lambda x: x[1], reverse=True)
+
+            # 5. Split
+            top_n = ranked[:self.top_n_count]
+            remaining = ranked[self.top_n_count:]
             
-            if not all_files:
-                self.log("No files found matching criteria.")
-                return
+            remaining_files = []
+            for _, _, f_list in remaining:
+                remaining_files.extend(f_list)
 
+            # 6. Generate Files & Master Index Data
             master_index_content = []
+            file_counter = 1
 
-            # ---------------------------------------------------------
-            # MODE A: Only MD (7 Alphabetical Bundles)
-            # ---------------------------------------------------------
-            if self.only_md:
-                self.log("Mode: Splitting MD files into 7 bundles alphabetically.")
-                # Sort alphabetically by relative path
-                all_files.sort(key=lambda p: p.relative_to(self.root_dir).as_posix().lower())
-                
-                total = len(all_files)
-                # Calculate chunk size (ceiling division)
-                chunk_size = math.ceil(total / 7)
-                
-                for i in range(7):
-                    start = i * chunk_size
-                    end = start + chunk_size
-                    chunk_files = all_files[start:end]
-                    
-                    if not chunk_files:
-                        break # No more files
-                        
-                    fname = f"0{i+1}_md_bundle.md"
-                    title = f"MD Bundle {i+1} (Alphabetical)"
-                    info = self.write_dump_file(fname, chunk_files, title)
-                    if info: master_index_content.append(info)
+            # Top N
+            for name, size, f_list in top_n:
+                fname = f"{file_counter:02d}_BIG_{name}.txt"
+                title = f"Top Folder: {name}"
+                info = self.write_dump_file(fname, f_list, title)
+                if info: master_index_content.append(info)
+                file_counter += 1
 
-                # Index as 8th file
-                index_fname = "08_MASTER_INDEX.md"
+            # Remaining
+            if remaining_files:
+                fname = f"{file_counter:02d}_Remaining_Folders.txt"
+                info = self.write_dump_file(fname, remaining_files, "All Other Folders")
+                if info: master_index_content.append(info)
+                file_counter += 1
 
-            # ---------------------------------------------------------
-            # MODE B: Standard Folder Split
-            # ---------------------------------------------------------
-            else:
-                self.log(f"Mode: Splitting by top {self.top_n_count} folders.")
-                
-                root_files = []
-                folder_groups: Dict[str, List[Path]] = {}
+            # Root
+            if root_files:
+                fname = f"{file_counter:02d}_Root_Files.txt"
+                info = self.write_dump_file(fname, root_files, "Root Directory Files")
+                if info: master_index_content.append(info)
+                file_counter += 1
 
-                for f in all_files:
-                    rel = f.relative_to(self.root_dir)
-                    if len(rel.parts) == 1:
-                        root_files.append(f)
-                    else:
-                        top = rel.parts[0]
-                        if top not in folder_groups: folder_groups[top] = []
-                        folder_groups[top].append(f)
-
-                ranked = []
-                for name, f_list in folder_groups.items():
-                    size = sum(self.get_file_size(f) for f in f_list)
-                    ranked.append((name, size, f_list))
-                ranked.sort(key=lambda x: x[1], reverse=True)
-
-                file_counter = 1
-                
-                # Top N
-                top_n = ranked[:self.top_n_count]
-                remaining = ranked[self.top_n_count:]
-                
-                for name, _, f_list in top_n:
-                    fname = f"{file_counter:02d}_BIG_{name}.txt"
-                    info = self.write_dump_file(fname, f_list, f"Top Folder: {name}")
-                    if info: master_index_content.append(info)
-                    file_counter += 1
-
-                # Remaining
-                remaining_files = [f for _, _, fl in remaining for f in fl]
-                if remaining_files:
-                    fname = f"{file_counter:02d}_Remaining_Folders.txt"
-                    info = self.write_dump_file(fname, remaining_files, "All Other Folders")
-                    if info: master_index_content.append(info)
-                    file_counter += 1
-
-                # Root
-                if root_files:
-                    fname = f"{file_counter:02d}_Root_Files.txt"
-                    info = self.write_dump_file(fname, root_files, "Root Directory Files")
-                    if info: master_index_content.append(info)
-                    file_counter += 1
-                
-                index_fname = f"{file_counter:02d}_MASTER_INDEX.txt"
-
-            # Write Master Index
+            # 7. Master Index File
+            index_fname = f"{file_counter:02d}_MASTER_INDEX.txt"
             with (self.output_dir / index_fname).open("w", encoding="utf-8") as f:
                 f.write(f"===== MASTER INDEX ({ts}) =====\n")
-                f.write(f"Source: {self.root_dir}\n")
-                f.write(f"Mode: {'Only MD (7 Bundles)' if self.only_md else 'Standard Smart Split'}\n\n")
+                f.write(f"Source: {self.root_dir}\n\n")
+                f.write("This file maps the content of the split dump files.\n\n")
                 f.write("\n".join(master_index_content))
             
             self.log(f"-> Created {index_fname}")
@@ -255,8 +213,8 @@ class DumpWorker:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Smart Code Dumper v3")
-        self.geometry("600x650")
+        self.title("Smart Code Dumper")
+        self.geometry("600x600")
         
         # Styles
         pad_opts = {'padx': 10, 'pady': 5}
@@ -265,49 +223,32 @@ class App(tk.Tk):
         lbl_frame = tk.LabelFrame(self, text="Configuration", padx=10, pady=10)
         lbl_frame.pack(fill="x", **pad_opts)
 
-        # Paths
+        # Repo Row
         tk.Label(lbl_frame, text="Repository Root:").grid(row=0, column=0, sticky="w")
         self.entry_repo = tk.Entry(lbl_frame, width=50)
         self.entry_repo.grid(row=0, column=1, padx=5)
         tk.Button(lbl_frame, text="Browse...", command=self.browse_repo).grid(row=0, column=2)
 
+        # Output Row
         tk.Label(lbl_frame, text="Output Folder:").grid(row=1, column=0, sticky="w")
         self.entry_out = tk.Entry(lbl_frame, width=50)
         self.entry_out.grid(row=1, column=1, padx=5)
         tk.Button(lbl_frame, text="Browse...", command=self.browse_out).grid(row=1, column=2)
 
+        # Split Row
         tk.Label(lbl_frame, text="Largest Folders to Split:").grid(row=2, column=0, sticky="w")
         self.spin_split = tk.Spinbox(lbl_frame, from_=1, to=20, width=5)
         self.spin_split.delete(0, "end")
-        self.spin_split.insert(0, 4)
+        self.spin_split.insert(0, 4) # Default
         self.spin_split.grid(row=2, column=1, sticky="w", padx=5)
 
-        # ---------------------------------------------------
-        # NEW OPTIONS
-        # ---------------------------------------------------
-        opts_frame = tk.LabelFrame(self, text="Filters & Modes", padx=10, pady=10)
-        opts_frame.pack(fill="x", **pad_opts)
-
-        self.var_ignore_txt = tk.BooleanVar(value=False)
-        self.var_ignore_md = tk.BooleanVar(value=False)
-        self.var_only_md = tk.BooleanVar(value=False)
-
-        # Checkboxes
-        chk_txt = tk.Checkbutton(opts_frame, text="Ignore .txt files", variable=self.var_ignore_txt)
-        chk_txt.grid(row=0, column=0, sticky="w", padx=10)
-
-        self.chk_md = tk.Checkbutton(opts_frame, text="Ignore .md files", variable=self.var_ignore_md)
-        self.chk_md.grid(row=0, column=1, sticky="w", padx=10)
-
-        chk_only_md = tk.Checkbutton(opts_frame, text="Only select .md (Bundles: 7 pkgs + Index)", 
-                                     variable=self.var_only_md, command=self.toggle_md_mode)
-        chk_only_md.grid(row=1, column=0, columnspan=2, sticky="w", padx=10, pady=5)
-
-        # Gitignore Notice
-        tk.Label(opts_frame, 
-                 text="Note: .gitignore rules & standard junk (node_modules, .git) are always excluded.",
+        # --- NEW: GITIGNORE MENTION ---
+        # Added a specific label to confirm exclusions
+        tk.Label(lbl_frame, 
+                 text="Note: .gitignore rules & standard junk (node_modules, .git) are excluded.",
                  fg="gray", font=("Arial", 8, "italic")
-        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        # ------------------------------
 
         # 2. Action
         self.btn_run = tk.Button(self, text="GENERATE DUMPS", bg="#dddddd", height=2, command=self.start_thread)
@@ -317,20 +258,13 @@ class App(tk.Tk):
         self.txt_log = scrolledtext.ScrolledText(self, height=15)
         self.txt_log.pack(fill="both", expand=True, padx=10, pady=10)
 
-    def toggle_md_mode(self):
-        """Ensures logic consistency when 'Only MD' is toggled."""
-        if self.var_only_md.get():
-            # If Only MD is ON, we cannot Ignore MD
-            self.var_ignore_md.set(False)
-            self.chk_md.config(state="disabled")
-        else:
-            self.chk_md.config(state="normal")
-
     def browse_repo(self):
         d = filedialog.askdirectory()
         if d:
             self.entry_repo.delete(0, tk.END)
             self.entry_repo.insert(0, d)
+            
+            # Auto-suggest parent folder for output
             p = Path(d)
             parent = p.parent
             self.entry_out.delete(0, tk.END)
@@ -359,21 +293,19 @@ class App(tk.Tk):
         if not repo or not os.path.isdir(repo):
             messagebox.showerror("Error", "Please select a valid repository folder.")
             return
+        if not out or not os.path.isdir(out):
+            messagebox.showerror("Error", "Please select a valid output folder.")
+            return
 
         self.btn_run.config(state="disabled", text="Running...")
         self.txt_log.delete(1.0, tk.END)
         
-        # Capture variables for thread safety
-        ign_txt = self.var_ignore_txt.get()
-        ign_md = self.var_ignore_md.get()
-        only_md = self.var_only_md.get()
-
-        t = threading.Thread(target=self.run_process, 
-                             args=(Path(repo), Path(out), split_n, ign_txt, ign_md, only_md))
+        # Run in thread to not freeze UI
+        t = threading.Thread(target=self.run_process, args=(Path(repo), Path(out), split_n))
         t.start()
 
-    def run_process(self, repo, out, split_n, ign_txt, ign_md, only_md):
-        worker = DumpWorker(repo, out, split_n, ign_txt, ign_md, only_md, self.log)
+    def run_process(self, repo, out, split_n):
+        worker = DumpWorker(repo, out, split_n, self.log)
         worker.run()
         self.btn_run.config(state="normal", text="GENERATE DUMPS")
 
