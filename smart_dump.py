@@ -15,13 +15,16 @@ import threading
 
 class DumpWorker:
     def __init__(self, root_dir: Path, output_dir: Path, top_n_count: int, 
-                 ignore_txt: bool, ignore_md: bool, only_md: bool, log_callback):
-        self.root_dir = root_dir
-        self.output_dir = output_dir
+                 ignore_txt: bool, ignore_md: bool, only_md: bool, 
+                 custom_excludes: List[Path], log_callback):
+        self.root_dir = root_dir.resolve()
+        self.output_dir = output_dir.resolve()
         self.top_n_count = top_n_count
         self.ignore_txt = ignore_txt
         self.ignore_md = ignore_md
         self.only_md = only_md
+        # Resolve all custom exclusions to absolute paths for comparison
+        self.custom_excludes = [p.resolve() for p in custom_excludes]
         self.log = log_callback
         
         # Standard Exclusions
@@ -58,6 +61,17 @@ class DumpWorker:
                 return True
         return False
 
+    def is_custom_excluded(self, path: Path) -> bool:
+        """
+        Checks if the path is explicitly excluded or inside an excluded folder.
+        """
+        path = path.resolve()
+        for exc in self.custom_excludes:
+            # Check if it is the excluded path OR inside it
+            if path == exc or exc in path.parents:
+                return True
+        return False
+
     def get_file_size(self, f: Path) -> int:
         try:
             return f.stat().st_size
@@ -71,20 +85,40 @@ class DumpWorker:
         self.log("Scanning directories...")
         
         for dirpath, dirnames, filenames in os.walk(self.root_dir, followlinks=True):
-            # Prune directories
-            dirnames[:] = [d for d in dirnames 
-                           if d not in self.ALWAYS_IGNORE_DIRS 
-                           and not self.match_ignore(d, git_patterns)]
+            current_dir = Path(dirpath).resolve()
+
+            # 1. Prune Directories (In-place)
+            # We filter out standard ignore dirs AND custom excluded dirs
+            safe_dirs = []
+            for d in dirnames:
+                full_dir_path = current_dir / d
+                
+                # Check standard ignore
+                if d in self.ALWAYS_IGNORE_DIRS: continue
+                # Check gitignore
+                if self.match_ignore(d, git_patterns): continue
+                # Check custom exclusions
+                if self.is_custom_excluded(full_dir_path): 
+                    # self.log(f"Skipping custom excluded folder: {d}")
+                    continue
+                
+                safe_dirs.append(d)
             
+            dirnames[:] = safe_dirs
+            
+            # 2. Process Files
             for f in filenames:
-                fpath = Path(dirpath) / f
+                fpath = current_dir / f
                 ext = fpath.suffix.lower()
 
-                # 1. Global binary/junk exclusions
+                # Global binary/junk exclusions
                 if ext in self.ALWAYS_IGNORE_EXT: continue
                 if self.match_ignore(f, git_patterns): continue
                 
-                # 2. Specific Format Logic
+                # Custom Exclusions (File level)
+                if self.is_custom_excluded(fpath): continue
+
+                # Specific Format Logic
                 if self.only_md:
                     if ext != ".md": continue
                 else:
@@ -112,11 +146,19 @@ class DumpWorker:
             
             out.write("===== INDEX =====\n")
             for f in files:
-                out.write(f" - {f.relative_to(self.root_dir).as_posix()}\n")
+                try:
+                    rel = f.relative_to(self.root_dir).as_posix()
+                except ValueError:
+                    rel = f.name # Fallback if path issue
+                out.write(f" - {rel}\n")
             out.write("===== END INDEX =====\n\n")
 
             for f in files:
-                rel = f.relative_to(self.root_dir).as_posix()
+                try:
+                    rel = f.relative_to(self.root_dir).as_posix()
+                except ValueError:
+                    rel = f.name
+
                 out.write(f"\n{'='*60}\nFILE: {rel}\n{'='*60}\n\n")
                 try:
                     text = f.read_text(encoding="utf-8", errors="replace")
@@ -134,7 +176,9 @@ class DumpWorker:
     def run(self):
         try:
             self.log(f"Starting process for: {self.root_dir}")
-            
+            if self.custom_excludes:
+                self.log(f"Custom exclusions active: {len(self.custom_excludes)} paths.")
+
             # Setup Output
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             mode_suffix = "_MD_ONLY" if self.only_md else ""
@@ -158,10 +202,12 @@ class DumpWorker:
             if self.only_md:
                 self.log("Mode: Splitting MD files into 7 bundles alphabetically.")
                 # Sort alphabetically by relative path
-                all_files.sort(key=lambda p: p.relative_to(self.root_dir).as_posix().lower())
+                try:
+                    all_files.sort(key=lambda p: p.relative_to(self.root_dir).as_posix().lower())
+                except:
+                    all_files.sort(key=lambda p: p.name.lower())
                 
                 total = len(all_files)
-                # Calculate chunk size (ceiling division)
                 chunk_size = math.ceil(total / 7)
                 
                 for i in range(7):
@@ -170,14 +216,13 @@ class DumpWorker:
                     chunk_files = all_files[start:end]
                     
                     if not chunk_files:
-                        break # No more files
+                        break 
                         
                     fname = f"0{i+1}_md_bundle.md"
                     title = f"MD Bundle {i+1} (Alphabetical)"
                     info = self.write_dump_file(fname, chunk_files, title)
                     if info: master_index_content.append(info)
 
-                # Index as 8th file
                 index_fname = "08_MASTER_INDEX.md"
 
             # ---------------------------------------------------------
@@ -190,7 +235,11 @@ class DumpWorker:
                 folder_groups: Dict[str, List[Path]] = {}
 
                 for f in all_files:
-                    rel = f.relative_to(self.root_dir)
+                    try:
+                        rel = f.relative_to(self.root_dir)
+                    except ValueError:
+                        continue # Skip if outside root (shouldn't happen)
+
                     if len(rel.parts) == 1:
                         root_files.append(f)
                     else:
@@ -255,8 +304,8 @@ class DumpWorker:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Smart Code Dumper v3")
-        self.geometry("600x650")
+        self.title("Smart Code Dumper v4")
+        self.geometry("600x750")  # Increased height for new fields
         
         # Styles
         pad_opts = {'padx': 10, 'pady': 5}
@@ -283,7 +332,28 @@ class App(tk.Tk):
         self.spin_split.grid(row=2, column=1, sticky="w", padx=5)
 
         # ---------------------------------------------------
-        # NEW OPTIONS
+        # NEW: Custom Exclusions
+        # ---------------------------------------------------
+        self.frame_excludes = tk.LabelFrame(self, text="Custom Path Exclusions", padx=10, pady=10)
+        self.frame_excludes.pack(fill="x", **pad_opts)
+
+        tk.Label(self.frame_excludes, text="Quantity of paths to exclude:").grid(row=0, column=0, sticky="w")
+        
+        # Quantity Selector (0-5)
+        self.spin_exclude_qty = tk.Spinbox(self.frame_excludes, from_=0, to=5, width=5, 
+                                           command=self.update_exclusion_widgets)
+        self.spin_exclude_qty.delete(0, "end")
+        self.spin_exclude_qty.insert(0, 0) # Default 0
+        self.spin_exclude_qty.grid(row=0, column=1, sticky="w", padx=5)
+
+        # Container for the dynamic rows
+        self.frame_dynamic_excludes = tk.Frame(self.frame_excludes)
+        self.frame_dynamic_excludes.grid(row=1, column=0, columnspan=3, sticky="we", pady=5)
+        
+        self.exclusion_entries = [] # To store Entry widgets
+
+        # ---------------------------------------------------
+        # Filters & Modes
         # ---------------------------------------------------
         opts_frame = tk.LabelFrame(self, text="Filters & Modes", padx=10, pady=10)
         opts_frame.pack(fill="x", **pad_opts)
@@ -292,7 +362,6 @@ class App(tk.Tk):
         self.var_ignore_md = tk.BooleanVar(value=False)
         self.var_only_md = tk.BooleanVar(value=False)
 
-        # Checkboxes
         chk_txt = tk.Checkbutton(opts_frame, text="Ignore .txt files", variable=self.var_ignore_txt)
         chk_txt.grid(row=0, column=0, sticky="w", padx=10)
 
@@ -303,7 +372,6 @@ class App(tk.Tk):
                                      variable=self.var_only_md, command=self.toggle_md_mode)
         chk_only_md.grid(row=1, column=0, columnspan=2, sticky="w", padx=10, pady=5)
 
-        # Gitignore Notice
         tk.Label(opts_frame, 
                  text="Note: .gitignore rules & standard junk (node_modules, .git) are always excluded.",
                  fg="gray", font=("Arial", 8, "italic")
@@ -314,13 +382,45 @@ class App(tk.Tk):
         self.btn_run.pack(fill="x", padx=20, pady=10)
 
         # 3. Log
-        self.txt_log = scrolledtext.ScrolledText(self, height=15)
+        self.txt_log = scrolledtext.ScrolledText(self, height=12)
         self.txt_log.pack(fill="both", expand=True, padx=10, pady=10)
 
+    def update_exclusion_widgets(self):
+        """Rebuilds the exclusion path rows based on the spinbox value."""
+        # 1. Clear existing widgets
+        for widget in self.frame_dynamic_excludes.winfo_children():
+            widget.destroy()
+        self.exclusion_entries.clear()
+
+        # 2. Get count
+        try:
+            count = int(self.spin_exclude_qty.get())
+        except ValueError:
+            count = 0
+
+        # 3. Build new rows
+        for i in range(count):
+            row_frame = tk.Frame(self.frame_dynamic_excludes)
+            row_frame.pack(fill="x", pady=2)
+            
+            tk.Label(row_frame, text=f"Path {i+1}:").pack(side="left")
+            
+            entry = tk.Entry(row_frame)
+            entry.pack(side="left", fill="x", expand=True, padx=5)
+            self.exclusion_entries.append(entry)
+            
+            btn = tk.Button(row_frame, text="Browse", 
+                            command=lambda e=entry: self.browse_exclusion(e))
+            btn.pack(side="right")
+
+    def browse_exclusion(self, entry_widget):
+        d = filedialog.askdirectory(title="Select Folder to Exclude")
+        if d:
+            entry_widget.delete(0, tk.END)
+            entry_widget.insert(0, d)
+
     def toggle_md_mode(self):
-        """Ensures logic consistency when 'Only MD' is toggled."""
         if self.var_only_md.get():
-            # If Only MD is ON, we cannot Ignore MD
             self.var_ignore_md.set(False)
             self.chk_md.config(state="disabled")
         else:
@@ -360,20 +460,26 @@ class App(tk.Tk):
             messagebox.showerror("Error", "Please select a valid repository folder.")
             return
 
+        # Gather Custom Exclusions
+        custom_excludes_paths = []
+        for entry in self.exclusion_entries:
+            val = entry.get().strip()
+            if val:
+                custom_excludes_paths.append(Path(val))
+
         self.btn_run.config(state="disabled", text="Running...")
         self.txt_log.delete(1.0, tk.END)
         
-        # Capture variables for thread safety
         ign_txt = self.var_ignore_txt.get()
         ign_md = self.var_ignore_md.get()
         only_md = self.var_only_md.get()
 
         t = threading.Thread(target=self.run_process, 
-                             args=(Path(repo), Path(out), split_n, ign_txt, ign_md, only_md))
+                             args=(Path(repo), Path(out), split_n, ign_txt, ign_md, only_md, custom_excludes_paths))
         t.start()
 
-    def run_process(self, repo, out, split_n, ign_txt, ign_md, only_md):
-        worker = DumpWorker(repo, out, split_n, ign_txt, ign_md, only_md, self.log)
+    def run_process(self, repo, out, split_n, ign_txt, ign_md, only_md, custom_excludes):
+        worker = DumpWorker(repo, out, split_n, ign_txt, ign_md, only_md, custom_excludes, self.log)
         worker.run()
         self.btn_run.config(state="normal", text="GENERATE DUMPS")
 
