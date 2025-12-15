@@ -14,16 +14,18 @@ import threading
 # --------------------------------------------------------------------
 
 class DumpWorker:
-    def __init__(self, root_dir: Path, output_dir: Path, top_n_count: int, 
+    def __init__(self, root_dir: Path, output_dir: Path, max_output_files: int, 
                  ignore_txt: bool, ignore_md: bool, only_md: bool, 
                  custom_excludes: List[Path], log_callback):
         self.root_dir = root_dir.resolve()
         self.output_dir = output_dir.resolve()
-        self.top_n_count = top_n_count
+        
+        # User limit (Target maximum files generated)
+        self.max_output_files = max(3, max_output_files) 
+        
         self.ignore_txt = ignore_txt
         self.ignore_md = ignore_md
         self.only_md = only_md
-        # Resolve all custom exclusions to absolute paths for comparison
         self.custom_excludes = [p.resolve() for p in custom_excludes]
         self.log = log_callback
         
@@ -40,6 +42,9 @@ class DumpWorker:
             ".bin", ".iso", ".img", ".log", ".sqlite", ".db", ".zip", ".gz",
             ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".lock"
         }
+        
+        # Cache gitignore patterns
+        self.git_patterns = self.load_gitignore()
 
     def load_gitignore(self) -> list:
         patterns = []
@@ -55,19 +60,15 @@ class DumpWorker:
             self.log("-> No .gitignore found. Using standard exclusions only.")
         return patterns
 
-    def match_ignore(self, name: str, patterns: list) -> bool:
-        for pat in patterns:
+    def match_ignore(self, name: str) -> bool:
+        for pat in self.git_patterns:
             if fnmatch.fnmatch(name, pat.rstrip("/")):
                 return True
         return False
 
     def is_custom_excluded(self, path: Path) -> bool:
-        """
-        Checks if the path is explicitly excluded or inside an excluded folder.
-        """
         path = path.resolve()
         for exc in self.custom_excludes:
-            # Check if it is the excluded path OR inside it
             if path == exc or exc in path.parents:
                 return True
         return False
@@ -78,30 +79,33 @@ class DumpWorker:
         except:
             return 0
 
-    def collect_files(self) -> List[Path]:
+    def collect_files_in_folder(self, folder_path: Path, recursive: bool = True) -> List[Path]:
+        """
+        Collects valid files within a specific folder. 
+        If recursive=False, only scans immediate children (used for Root).
+        """
         valid_files = []
-        git_patterns = self.load_gitignore()
         
-        self.log("Scanning directories...")
-        
-        for dirpath, dirnames, filenames in os.walk(self.root_dir, followlinks=True):
+        if recursive:
+            iterator = os.walk(folder_path, followlinks=True)
+        else:
+            # Fake an os.walk for just one level
+            try:
+                # next() gets the first tuple (current, dirs, files)
+                iterator = [next(os.walk(folder_path, followlinks=True))]
+            except StopIteration:
+                return []
+
+        for dirpath, dirnames, filenames in iterator:
             current_dir = Path(dirpath).resolve()
 
-            # 1. Prune Directories (In-place)
-            # We filter out standard ignore dirs AND custom excluded dirs
+            # 1. Prune Directories
             safe_dirs = []
             for d in dirnames:
                 full_dir_path = current_dir / d
-                
-                # Check standard ignore
                 if d in self.ALWAYS_IGNORE_DIRS: continue
-                # Check gitignore
-                if self.match_ignore(d, git_patterns): continue
-                # Check custom exclusions
-                if self.is_custom_excluded(full_dir_path): 
-                    # self.log(f"Skipping custom excluded folder: {d}")
-                    continue
-                
+                if self.match_ignore(d): continue
+                if self.is_custom_excluded(full_dir_path): continue
                 safe_dirs.append(d)
             
             dirnames[:] = safe_dirs
@@ -111,14 +115,10 @@ class DumpWorker:
                 fpath = current_dir / f
                 ext = fpath.suffix.lower()
 
-                # Global binary/junk exclusions
                 if ext in self.ALWAYS_IGNORE_EXT: continue
-                if self.match_ignore(f, git_patterns): continue
-                
-                # Custom Exclusions (File level)
+                if self.match_ignore(f): continue
                 if self.is_custom_excluded(fpath): continue
 
-                # Specific Format Logic
                 if self.only_md:
                     if ext != ".md": continue
                 else:
@@ -129,34 +129,40 @@ class DumpWorker:
                 
         return valid_files
 
-    def write_dump_file(self, filename: str, files: List[Path], title: str) -> str:
+    def write_dump_file(self, filename: str, files: List[Path], title: str) -> dict:
         if not files:
-            return ""
+            return None
 
         out_path = self.output_dir / filename
         total_files = len(files)
         total_size = sum(self.get_file_size(f) for f in files)
         size_mb = total_size / (1024*1024)
 
+        # Sort files inside the dump for readability
+        try:
+            files.sort(key=lambda p: p.relative_to(self.root_dir).as_posix().lower())
+        except:
+            files.sort(key=lambda p: p.name.lower())
+
         with out_path.open("w", encoding="utf-8") as out:
             out.write(f"===== {title} =====\n")
             out.write(f"Generated: {datetime.now()}\n")
-            out.write(f"Files: {total_files}\n")
-            out.write(f"Total Size: {size_mb:.2f} MB\n\n")
+            out.write(f"Source: {self.root_dir}\n")
+            out.write(f"Files: {total_files} | Size: {size_mb:.2f} MB\n\n")
             
-            out.write("===== INDEX =====\n")
+            out.write("===== CONTENTS =====\n")
             for f in files:
                 try:
                     rel = f.relative_to(self.root_dir).as_posix()
-                except ValueError:
-                    rel = f.name # Fallback if path issue
+                except:
+                    rel = f.name
                 out.write(f" - {rel}\n")
-            out.write("===== END INDEX =====\n\n")
+            out.write("\n")
 
             for f in files:
                 try:
                     rel = f.relative_to(self.root_dir).as_posix()
-                except ValueError:
+                except:
                     rel = f.name
 
                 out.write(f"\n{'='*60}\nFILE: {rel}\n{'='*60}\n\n")
@@ -166,135 +172,180 @@ class DumpWorker:
                 except Exception as e:
                     out.write(f"[Error reading file: {e}]\n")
         
-        self.log(f"-> Created {filename} ({total_files} files)")
+        self.log(f"-> Created: {filename} ({size_mb:.2f} MB)")
         
-        return (f"FILE: {filename}\n"
-                f"CONTENT: {title}\n"
-                f"STATS: {total_files} files, {size_mb:.2f} MB\n"
-                f"{'-'*40}\n")
+        return {
+            "filename": filename,
+            "title": title,
+            "file_list": files,
+            "size_mb": size_mb
+        }
 
     def run(self):
         try:
-            self.log(f"Starting process for: {self.root_dir}")
-            if self.custom_excludes:
-                self.log(f"Custom exclusions active: {len(self.custom_excludes)} paths.")
-
-            # Setup Output
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            mode_suffix = "_MD_ONLY" if self.only_md else ""
-            self.output_dir = self.output_dir / f"smart_dump_{ts}{mode_suffix}"
-            self.output_dir.mkdir(parents=True, exist_ok=True)
-            self.log(f"Output folder: {self.output_dir}")
-
-            # Collect
-            all_files = self.collect_files()
-            self.log(f"Found {len(all_files)} total valid files.")
+            self.log(f"Scanning structure of: {self.root_dir}")
             
-            if not all_files:
-                self.log("No files found matching criteria.")
+            # Setup Output
+            repo_name = self.root_dir.name
+            ts = datetime.now().strftime("%Y%m%d_%H%M")
+            base_name_pattern = f"{repo_name}_{ts}"
+            
+            mode_suffix = "_MD_ONLY" if self.only_md else ""
+            run_folder_name = f"{base_name_pattern}_Dump{mode_suffix}"
+            self.output_dir = self.output_dir / run_folder_name
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            self.log(f"Output: {self.output_dir}")
+
+            # -------------------------------------------------------------
+            # STEP 1: ANALYZE ROOT STRUCTURE
+            # -------------------------------------------------------------
+            
+            # A. Get files directly in Root
+            root_files = self.collect_files_in_folder(self.root_dir, recursive=False)
+            
+            # B. Get Top-Level Directories
+            top_level_items = []
+            try:
+                for item in os.listdir(self.root_dir):
+                    full_path = self.root_dir / item
+                    if full_path.is_dir():
+                        if item in self.ALWAYS_IGNORE_DIRS: continue
+                        if self.match_ignore(item): continue
+                        if self.is_custom_excluded(full_path): continue
+                        top_level_items.append(full_path)
+            except Exception as e:
+                self.log(f"Error scanning root dir: {e}")
                 return
 
-            master_index_content = []
-
-            # ---------------------------------------------------------
-            # MODE A: Only MD (7 Alphabetical Bundles)
-            # ---------------------------------------------------------
-            if self.only_md:
-                self.log("Mode: Splitting MD files into 7 bundles alphabetically.")
-                # Sort alphabetically by relative path
-                try:
-                    all_files.sort(key=lambda p: p.relative_to(self.root_dir).as_posix().lower())
-                except:
-                    all_files.sort(key=lambda p: p.name.lower())
-                
-                total = len(all_files)
-                chunk_size = math.ceil(total / 7)
-                
-                for i in range(7):
-                    start = i * chunk_size
-                    end = start + chunk_size
-                    chunk_files = all_files[start:end]
-                    
-                    if not chunk_files:
-                        break 
-                        
-                    fname = f"0{i+1}_md_bundle.md"
-                    title = f"MD Bundle {i+1} (Alphabetical)"
-                    info = self.write_dump_file(fname, chunk_files, title)
-                    if info: master_index_content.append(info)
-
-                index_fname = "08_MASTER_INDEX.md"
-
-            # ---------------------------------------------------------
-            # MODE B: Standard Folder Split
-            # ---------------------------------------------------------
-            else:
-                self.log(f"Mode: Splitting by top {self.top_n_count} folders.")
-                
-                root_files = []
-                folder_groups: Dict[str, List[Path]] = {}
-
-                for f in all_files:
-                    try:
-                        rel = f.relative_to(self.root_dir)
-                    except ValueError:
-                        continue # Skip if outside root (shouldn't happen)
-
-                    if len(rel.parts) == 1:
-                        root_files.append(f)
-                    else:
-                        top = rel.parts[0]
-                        if top not in folder_groups: folder_groups[top] = []
-                        folder_groups[top].append(f)
-
-                ranked = []
-                for name, f_list in folder_groups.items():
-                    size = sum(self.get_file_size(f) for f in f_list)
-                    ranked.append((name, size, f_list))
-                ranked.sort(key=lambda x: x[1], reverse=True)
-
-                file_counter = 1
-                
-                # Top N
-                top_n = ranked[:self.top_n_count]
-                remaining = ranked[self.top_n_count:]
-                
-                for name, _, f_list in top_n:
-                    fname = f"{file_counter:02d}_BIG_{name}.txt"
-                    info = self.write_dump_file(fname, f_list, f"Top Folder: {name}")
-                    if info: master_index_content.append(info)
-                    file_counter += 1
-
-                # Remaining
-                remaining_files = [f for _, _, fl in remaining for f in fl]
-                if remaining_files:
-                    fname = f"{file_counter:02d}_Remaining_Folders.txt"
-                    info = self.write_dump_file(fname, remaining_files, "All Other Folders")
-                    if info: master_index_content.append(info)
-                    file_counter += 1
-
-                # Root
-                if root_files:
-                    fname = f"{file_counter:02d}_Root_Files.txt"
-                    info = self.write_dump_file(fname, root_files, "Root Directory Files")
-                    if info: master_index_content.append(info)
-                    file_counter += 1
-                
-                index_fname = f"{file_counter:02d}_MASTER_INDEX.txt"
-
-            # Write Master Index
-            with (self.output_dir / index_fname).open("w", encoding="utf-8") as f:
-                f.write(f"===== MASTER INDEX ({ts}) =====\n")
-                f.write(f"Source: {self.root_dir}\n")
-                f.write(f"Mode: {'Only MD (7 Bundles)' if self.only_md else 'Standard Smart Split'}\n\n")
-                f.write("\n".join(master_index_content))
+            # C. Analyze each folder (collect files & calculate size)
+            analyzed_folders = []
+            self.log(f"Found {len(top_level_items)} top-level folders. Analyzing contents...")
             
-            self.log(f"-> Created {index_fname}")
+            for folder in top_level_items:
+                f_files = self.collect_files_in_folder(folder, recursive=True)
+                if f_files: # Only keep folders that have valid content
+                    size = sum(self.get_file_size(f) for f in f_files)
+                    analyzed_folders.append({
+                        'name': folder.name,
+                        'files': f_files,
+                        'size': size
+                    })
+
+            # Sort folders by size (Largest first)
+            analyzed_folders.sort(key=lambda x: x['size'], reverse=True)
+
+            # -------------------------------------------------------------
+            # STEP 2: DETERMINE PARTITIONING
+            # -------------------------------------------------------------
+            
+            # Slots calculation
+            # Max Output = (1 Index) + (1 Root, optional) + (Folders...)
+            
+            available_slots = self.max_output_files - 1 # Reserve 1 for Master Index
+            
+            dumps_to_create = [] # List of (Filename, Files, Title)
+
+            # 1. Handle Root Files
+            if root_files:
+                available_slots -= 1
+                fname = f"{base_name_pattern}_ROOT_Files.txt"
+                dumps_to_create.append((fname, root_files, "ROOT FILES"))
+            
+            # 2. Handle Folders
+            if not analyzed_folders:
+                self.log("No valid folders found.")
+            else:
+                # If we have more folders than slots, we need an "OTHERS" bin
+                if len(analyzed_folders) <= available_slots:
+                    # Case A: We have enough slots for every folder
+                    for folder in analyzed_folders:
+                        fname = f"{base_name_pattern}_{folder['name']}.txt"
+                        dumps_to_create.append((fname, folder['files'], f"FOLDER: {folder['name']}"))
+                else:
+                    # Case B: Too many folders, need to group the smallest ones
+                    # Calculate how many individual folders we can keep
+                    # We need 1 slot for "OTHERS", so distinct folders = available_slots - 1
+                    distinct_count = max(0, available_slots - 1)
+                    
+                    # Top folders get their own files
+                    top_folders = analyzed_folders[:distinct_count]
+                    remaining_folders = analyzed_folders[distinct_count:]
+                    
+                    for folder in top_folders:
+                        fname = f"{base_name_pattern}_{folder['name']}.txt"
+                        dumps_to_create.append((fname, folder['files'], f"FOLDER: {folder['name']}"))
+                    
+                    # Combine the rest
+                    others_files = []
+                    others_names = []
+                    for folder in remaining_folders:
+                        others_files.extend(folder['files'])
+                        others_names.append(folder['name'])
+                    
+                    if others_files:
+                        fname = f"{base_name_pattern}_OTHERS.txt"
+                        title = f"OTHERS ({len(remaining_folders)} folders: {', '.join(others_names[:3])}...)"
+                        dumps_to_create.append((fname, others_files, title))
+
+            # -------------------------------------------------------------
+            # STEP 3: WRITE FILES
+            # -------------------------------------------------------------
+            
+            generated_stats = []
+            
+            self.log(f"Generating {len(dumps_to_create)} content files...")
+            
+            for fname, files, title in dumps_to_create:
+                info = self.write_dump_file(fname, files, title)
+                if info:
+                    generated_stats.append(info)
+
+            # -------------------------------------------------------------
+            # STEP 4: MASTER INDEX
+            # -------------------------------------------------------------
+            index_filename = f"{base_name_pattern}_MASTER_INDEX.txt"
+            total_source_files = sum(len(stat['file_list']) for stat in generated_stats)
+            
+            with (self.output_dir / index_filename).open("w", encoding="utf-8") as f:
+                f.write(f"===== MASTER INDEX =====\n")
+                f.write(f"Repo: {repo_name}\n")
+                f.write(f"Source: {self.root_dir}\n")
+                f.write(f"Generated: {ts}\n")
+                f.write(f"Total Valid Files: {total_source_files}\n")
+                f.write(f"Dump Files Created: {len(generated_stats)}\n\n")
+                
+                f.write("===== FILE MAP =====\n\n")
+                
+                for stat in generated_stats:
+                    d_name = stat['filename']
+                    d_title = stat['title']
+                    d_count = len(stat['file_list'])
+                    d_size = stat['size_mb']
+                    
+                    f.write(f"FILE: {d_name}\n")
+                    f.write(f"Context: {d_title}\n")
+                    f.write(f"Stats: {d_count} files, {d_size:.2f} MB\n")
+                    f.write(f"Contains:\n")
+                    
+                    # Sort list for index
+                    f_list_sorted = sorted(stat['file_list'], key=lambda x: str(x))
+                    
+                    for src_file in f_list_sorted:
+                        try:
+                            rel = src_file.relative_to(self.root_dir).as_posix()
+                        except:
+                            rel = src_file.name
+                        f.write(f"   [x] {rel}\n")
+                    f.write(f"\n{'-'*40}\n\n")
+
+            self.log(f"-> Created Master Index: {index_filename}")
             self.log("\nDONE! You can close this window.")
             messagebox.showinfo("Success", f"Dumps generated in:\n{self.output_dir}")
 
         except Exception as e:
             self.log(f"CRITICAL ERROR: {e}")
+            import traceback
+            traceback.print_exc()
             messagebox.showerror("Error", str(e))
 
 # --------------------------------------------------------------------
@@ -304,13 +355,13 @@ class DumpWorker:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Smart Code Dumper v4")
-        self.geometry("600x750")  # Increased height for new fields
+        self.title("Smart Code Dumper v5.0 (Folder-Aware)")
+        self.geometry("600x750")
         
         # Styles
         pad_opts = {'padx': 10, 'pady': 5}
         
-        # 1. Repo Selection
+        # 1. Configuration Frame
         lbl_frame = tk.LabelFrame(self, text="Configuration", padx=10, pady=10)
         lbl_frame.pack(fill="x", **pad_opts)
 
@@ -325,14 +376,17 @@ class App(tk.Tk):
         self.entry_out.grid(row=1, column=1, padx=5)
         tk.Button(lbl_frame, text="Browse...", command=self.browse_out).grid(row=1, column=2)
 
-        tk.Label(lbl_frame, text="Largest Folders to Split:").grid(row=2, column=0, sticky="w")
-        self.spin_split = tk.Spinbox(lbl_frame, from_=1, to=20, width=5)
+        # Total Output Files Selector
+        tk.Label(lbl_frame, text="Max Output Files Limit:").grid(row=2, column=0, sticky="w")
+        self.spin_split = tk.Spinbox(lbl_frame, from_=2, to=50, width=5)
         self.spin_split.delete(0, "end")
-        self.spin_split.insert(0, 4)
+        self.spin_split.insert(0, 10) # Default 10
         self.spin_split.grid(row=2, column=1, sticky="w", padx=5)
+        
+        tk.Label(lbl_frame, text="(Determines when to group small folders into 'OTHERS')", fg="gray", font=("Arial", 8)).grid(row=3, column=1, sticky="w", padx=5)
 
         # ---------------------------------------------------
-        # NEW: Custom Exclusions
+        # Custom Exclusions
         # ---------------------------------------------------
         self.frame_excludes = tk.LabelFrame(self, text="Custom Path Exclusions", padx=10, pady=10)
         self.frame_excludes.pack(fill="x", **pad_opts)
@@ -343,19 +397,19 @@ class App(tk.Tk):
         self.spin_exclude_qty = tk.Spinbox(self.frame_excludes, from_=0, to=5, width=5, 
                                            command=self.update_exclusion_widgets)
         self.spin_exclude_qty.delete(0, "end")
-        self.spin_exclude_qty.insert(0, 0) # Default 0
+        self.spin_exclude_qty.insert(0, 0)
         self.spin_exclude_qty.grid(row=0, column=1, sticky="w", padx=5)
 
         # Container for the dynamic rows
         self.frame_dynamic_excludes = tk.Frame(self.frame_excludes)
         self.frame_dynamic_excludes.grid(row=1, column=0, columnspan=3, sticky="we", pady=5)
         
-        self.exclusion_entries = [] # To store Entry widgets
+        self.exclusion_entries = []
 
         # ---------------------------------------------------
         # Filters & Modes
         # ---------------------------------------------------
-        opts_frame = tk.LabelFrame(self, text="Filters & Modes", padx=10, pady=10)
+        opts_frame = tk.LabelFrame(self, text="Filters", padx=10, pady=10)
         opts_frame.pack(fill="x", **pad_opts)
 
         self.var_ignore_txt = tk.BooleanVar(value=False)
@@ -368,7 +422,7 @@ class App(tk.Tk):
         self.chk_md = tk.Checkbutton(opts_frame, text="Ignore .md files", variable=self.var_ignore_md)
         self.chk_md.grid(row=0, column=1, sticky="w", padx=10)
 
-        chk_only_md = tk.Checkbutton(opts_frame, text="Only select .md (Bundles: 7 pkgs + Index)", 
+        chk_only_md = tk.Checkbutton(opts_frame, text="Scan only .md files", 
                                      variable=self.var_only_md, command=self.toggle_md_mode)
         chk_only_md.grid(row=1, column=0, columnspan=2, sticky="w", padx=10, pady=5)
 
@@ -387,18 +441,15 @@ class App(tk.Tk):
 
     def update_exclusion_widgets(self):
         """Rebuilds the exclusion path rows based on the spinbox value."""
-        # 1. Clear existing widgets
         for widget in self.frame_dynamic_excludes.winfo_children():
             widget.destroy()
         self.exclusion_entries.clear()
 
-        # 2. Get count
         try:
             count = int(self.spin_exclude_qty.get())
         except ValueError:
             count = 0
 
-        # 3. Build new rows
         for i in range(count):
             row_frame = tk.Frame(self.frame_dynamic_excludes)
             row_frame.pack(fill="x", pady=2)
@@ -451,9 +502,9 @@ class App(tk.Tk):
         out = self.entry_out.get()
         
         try:
-            split_n = int(self.spin_split.get())
+            max_files = int(self.spin_split.get())
         except ValueError:
-            messagebox.showerror("Error", "Split count must be a number")
+            messagebox.showerror("Error", "Max files must be a number")
             return
 
         if not repo or not os.path.isdir(repo):
@@ -475,11 +526,11 @@ class App(tk.Tk):
         only_md = self.var_only_md.get()
 
         t = threading.Thread(target=self.run_process, 
-                             args=(Path(repo), Path(out), split_n, ign_txt, ign_md, only_md, custom_excludes_paths))
+                             args=(Path(repo), Path(out), max_files, ign_txt, ign_md, only_md, custom_excludes_paths))
         t.start()
 
-    def run_process(self, repo, out, split_n, ign_txt, ign_md, only_md, custom_excludes):
-        worker = DumpWorker(repo, out, split_n, ign_txt, ign_md, only_md, custom_excludes, self.log)
+    def run_process(self, repo, out, max_files, ign_txt, ign_md, only_md, custom_excludes):
+        worker = DumpWorker(repo, out, max_files, ign_txt, ign_md, only_md, custom_excludes, self.log)
         worker.run()
         self.btn_run.config(state="normal", text="GENERATE DUMPS")
 
