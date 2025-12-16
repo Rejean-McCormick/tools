@@ -55,7 +55,7 @@ def create_code_cell(content):
     }
 
 # --------------------------------------------------------------------
-# 2. Core Logic (The Worker)
+# 2. Core Logic (The Worker) - IMPROVED
 # --------------------------------------------------------------------
 
 class DumpWorker:
@@ -76,39 +76,79 @@ class DumpWorker:
         self.log = log_callback
         self.ask_overwrite = overwrite_callback
         
+        # [FIX] Added 'WEB-INF', 'classes', 'lib' to prevent 600MB Java blobs
         self.ALWAYS_IGNORE_DIRS = {
             ".git", ".svn", ".hg", ".idea", ".vscode", ".ipynb_checkpoints",
             "node_modules", "venv", ".venv", "env", 
             "__pycache__", ".mypy_cache", ".pytest_cache",
             "dist", "build", "coverage", "target", "out",
-            "abstract_wiki_architect.egg-info"
+            "abstract_wiki_architect.egg-info",
+            "WEB-INF", "classes", "lib" 
         }
         self.ALWAYS_IGNORE_EXT = {
-            ".pyc", ".pyo", ".pyd", ".exe", ".dll", ".so", ".dylib", 
+            ".pyc", ".pyo", ".pyd", ".exe", ".dll", ".so", ".dylib", ".class", ".jar", ".war",
             ".bin", ".iso", ".img", ".log", ".sqlite", ".db", ".zip", ".gz",
             ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".lock", ".pdf"
         }
         
-        self.git_patterns = self.load_gitignore()
+        self.git_patterns = self.load_all_gitignores()
 
-    def load_gitignore(self) -> list:
+    def load_all_gitignores(self) -> list:
+        """Scans the entire repo for .gitignore files and aggregates patterns."""
         patterns = []
-        gitignore = self.root_dir / ".gitignore"
-        if gitignore.exists():
-            try:
-                with gitignore.open("r", encoding="utf-8") as f:
-                    patterns = [line.strip() for line in f if line.strip() and not line.startswith("#")]
-                self.log(f"-> Loaded .gitignore ({len(patterns)} rules active).")
-            except Exception as e:
-                self.log(f"Error reading .gitignore: {e}")
-        else:
-            self.log("-> No .gitignore found. Using standard exclusions only.")
+        self.log("-> Scanning for .gitignore files...")
+        
+        count = 0
+        # Walk the tree to find all .gitignore files (Nested support)
+        for root, _, files in os.walk(self.root_dir):
+            if ".gitignore" in files:
+                git_path = Path(root) / ".gitignore"
+                try:
+                    with git_path.open("r", encoding="utf-8") as f:
+                        # We try to make patterns roughly relative to match anywhere
+                        # This is a heuristic: it merges all ignores into a global exclude list
+                        for line in f:
+                            line = line.strip()
+                            if not line or line.startswith("#"): continue
+                            patterns.append(line)
+                            # Handle directory-specific ignores (e.g. "foo/") by also adding "foo"
+                            if line.endswith("/"):
+                                patterns.append(line.rstrip("/"))
+                    count += 1
+                except Exception as e:
+                    self.log(f"Warn: Could not read {git_path}: {e}")
+
+        self.log(f"-> Loaded {count} .gitignore files ({len(patterns)} rules).")
         return patterns
 
-    def match_ignore(self, name: str) -> bool:
+    def match_ignore(self, path: Path, is_dir: bool) -> bool:
+        """
+        Checks if a path should be ignored based on git patterns.
+        [FIX] Now checks RELATIVE PATHS, not just filenames.
+        """
+        try:
+            # Get path relative to project root
+            rel_path = path.relative_to(self.root_dir).as_posix()
+        except ValueError:
+            # Should not happen given how we walk, but safety first
+            rel_path = path.name
+
+        name = path.name
+
         for pat in self.git_patterns:
-            if fnmatch.fnmatch(name, pat.rstrip("/")):
+            # 1. Standard wildcard match on the filename (e.g. *.log)
+            if fnmatch.fnmatch(name, pat):
                 return True
+            
+            # 2. Path-specific match (e.g. webapp/WEB-INF/)
+            # We normalize patterns to handle matching folders anywhere
+            if fnmatch.fnmatch(rel_path, pat):
+                return True
+            
+            # 3. Directory prefix match (e.g. node_modules/*)
+            if rel_path.startswith(pat + "/") or rel_path == pat:
+                return True
+                
         return False
 
     def is_custom_excluded(self, path: Path) -> bool:
@@ -136,20 +176,39 @@ class DumpWorker:
 
         for dirpath, dirnames, filenames in iterator:
             current_dir = Path(dirpath).resolve()
+            
+            # [FIX] Filter Directories in place to prevent recursing into ignored dirs
             safe_dirs = []
             for d in dirnames:
                 full_dir_path = current_dir / d
-                if d in self.ALWAYS_IGNORE_DIRS: continue
-                if self.match_ignore(d): continue
-                if self.is_custom_excluded(full_dir_path): continue
+                
+                # Check 1: Hardcoded ignores
+                if d in self.ALWAYS_IGNORE_DIRS: 
+                    continue
+                
+                # Check 2: Gitignore patterns (pass Full Path object + is_dir=True)
+                if self.match_ignore(full_dir_path, is_dir=True): 
+                    continue
+                
+                # Check 3: Custom exclusions
+                if self.is_custom_excluded(full_dir_path): 
+                    continue
+                    
                 safe_dirs.append(d)
+            
+            # Apply filter so os.walk doesn't enter them
             dirnames[:] = safe_dirs
             
+            # Filter Files
             for f in filenames:
                 fpath = current_dir / f
                 ext = fpath.suffix.lower()
+                
                 if ext in self.ALWAYS_IGNORE_EXT: continue
-                if self.match_ignore(f): continue
+                
+                # Check Gitignore (pass Full Path object + is_dir=False)
+                if self.match_ignore(fpath, is_dir=False): continue
+                
                 if self.is_custom_excluded(fpath): continue
 
                 if self.only_md:
@@ -157,6 +216,7 @@ class DumpWorker:
                 else:
                     if self.ignore_txt and ext == ".txt": continue
                     if self.ignore_md and ext == ".md": continue
+                
                 valid_files.append(fpath)
         return valid_files
 
@@ -250,11 +310,13 @@ class DumpWorker:
             # ----------------------------------------
             root_files = self.collect_files_in_folder(self.root_dir, recursive=False)
             top_level_items = []
+            
+            # [FIX] Manually check ignoring for Top Level items too
             for item in os.listdir(self.root_dir):
                 full_path = self.root_dir / item
                 if full_path.is_dir():
                     if item in self.ALWAYS_IGNORE_DIRS: continue
-                    if self.match_ignore(item): continue
+                    if self.match_ignore(full_path, is_dir=True): continue
                     if self.is_custom_excluded(full_path): continue
                     top_level_items.append(full_path)
 
@@ -270,7 +332,6 @@ class DumpWorker:
             available_slots = self.max_output_files 
             planned_dumps = []
             
-            # Use the FIXED NAME for the index link
             index_filename = "NoteBookIndex.ipynb"
 
             if root_files:
@@ -321,7 +382,7 @@ class DumpWorker:
                     generated_meta.append(meta)
 
             # ----------------------------------------
-            # STEP 3: GENERATE INDEX (Optional)
+            # STEP 3: GENERATE INDEX
             # ----------------------------------------
             if self.create_index:
                 index_path = self.output_dir / index_filename
@@ -329,7 +390,6 @@ class DumpWorker:
                 should_write = True
                 if index_path.exists():
                     self.log(f"Index file {index_filename} already exists.")
-                    # Ask GUI to confirm overwrite
                     if not self.ask_overwrite(index_filename):
                         should_write = False
                         self.log("Skipping index generation (User cancelled overwrite).")
@@ -339,10 +399,8 @@ class DumpWorker:
                 if should_write:
                     index_data = create_notebook_structure()
                     
-                    # Header
                     index_data["cells"].append(create_markdown_cell(f"# 🏠 {repo_name} - Index\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M')}"))
 
-                    # TOC
                     toc_md = "## 📚 Table of Contents\n\n| Volume | Description | Size |\n|---|---|---|\n"
                     for meta in generated_meta:
                         link = f"[{meta['filename']}]({meta['filename']})"
@@ -372,7 +430,7 @@ class DumpWorker:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Smart Wiki Dumper v9.0")
+        self.title("Smart Wiki Dumper v9.1 (Fixed)")
         self.geometry("600x800")
         
         pad_opts = {'padx': 10, 'pady': 5}
@@ -384,6 +442,7 @@ class App(tk.Tk):
         tk.Label(lbl_frame, text="Repository Root:").grid(row=0, column=0, sticky="w")
         self.entry_repo = tk.Entry(lbl_frame, width=50)
         self.entry_repo.grid(row=0, column=1, padx=5)
+        self.entry_repo.insert(0, os.getcwd()) # Default to current dir
         tk.Button(lbl_frame, text="Browse...", command=self.browse_repo).grid(row=0, column=2)
 
         tk.Label(lbl_frame, text="Output Folder:").grid(row=1, column=0, sticky="w")
@@ -486,11 +545,6 @@ class App(tk.Tk):
         self.txt_log.see(tk.END)
 
     def safe_ask_overwrite(self, filename):
-        """Thread-safe way to ask for overwrite permission."""
-        # Since tkinter messageboxes can block threads weirdly on some OS,
-        # we strictly shouldn't call this from a thread, but for simple tools 
-        # it usually works. If it hangs, we'd need a queue. 
-        # For simplicity in this script, direct call:
         return messagebox.askyesno("File Exists", f"The file '{filename}' already exists.\n\nOverwrite it?")
 
     def start_thread(self):
