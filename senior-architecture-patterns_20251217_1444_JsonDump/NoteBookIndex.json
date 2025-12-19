@@ -1,0 +1,76 @@
+{
+  "format": "wiki_dump_index_json",
+  "format_version": 1,
+  "generated_at": "2025-12-17T14:44",
+  "repo_name": "senior-architecture-patterns",
+  "root_dir": "C:\\MyCode\\Tools\\The-Senior-Architect_s-Codex\\senior-architecture-patterns",
+  "volumes": [
+    {
+      "filename": "senior-architecture-patterns_20251217_1444_01_01-stability-and-resilience.json",
+      "title": "FOLDER: 01-stability-and-resilience",
+      "short_title": "01-stability-and-resilience",
+      "size_mb": 0.0302,
+      "file_count": 7
+    },
+    {
+      "filename": "senior-architecture-patterns_20251217_1444_02_03-data-management-consistency.json",
+      "title": "FOLDER: 03-data-management-consistency",
+      "short_title": "03-data-management-consistency",
+      "size_mb": 0.03,
+      "file_count": 6
+    },
+    {
+      "filename": "senior-architecture-patterns_20251217_1444_03_02-structural-and-decoupling.json",
+      "title": "FOLDER: 02-structural-and-decoupling",
+      "short_title": "02-structural-and-decoupling",
+      "size_mb": 0.0284,
+      "file_count": 6
+    },
+    {
+      "filename": "senior-architecture-patterns_20251217_1444_04_08-emerging-and-specialized.json",
+      "title": "FOLDER: 08-emerging-and-specialized",
+      "short_title": "08-emerging-and-specialized",
+      "size_mb": 0.0226,
+      "file_count": 5
+    },
+    {
+      "filename": "senior-architecture-patterns_20251217_1444_05_07-observability-and-maintenance.json",
+      "title": "FOLDER: 07-observability-and-maintenance",
+      "short_title": "07-observability-and-maintenance",
+      "size_mb": 0.0198,
+      "file_count": 5
+    },
+    {
+      "filename": "senior-architecture-patterns_20251217_1444_06_04-scalability-and-performance.json",
+      "title": "FOLDER: 04-scalability-and-performance",
+      "short_title": "04-scalability-and-performance",
+      "size_mb": 0.0186,
+      "file_count": 4
+    },
+    {
+      "filename": "senior-architecture-patterns_20251217_1444_07_06-operational-and-deployment.json",
+      "title": "FOLDER: 06-operational-and-deployment",
+      "short_title": "06-operational-and-deployment",
+      "size_mb": 0.0179,
+      "file_count": 4
+    },
+    {
+      "filename": "senior-architecture-patterns_20251217_1444_08_05-messaging-and-communication.json",
+      "title": "FOLDER: 05-messaging-and-communication",
+      "short_title": "05-messaging-and-communication",
+      "size_mb": 0.0177,
+      "file_count": 4
+    },
+    {
+      "filename": "senior-architecture-patterns_20251217_1444_09_00-introduction.json",
+      "title": "FOLDER: 00-introduction",
+      "short_title": "00-introduction",
+      "size_mb": 0.0112,
+      "file_count": 2
+    }
+  ],
+  "instructions": [
+    "Open a volume JSON to view file contents.",
+    "Use the nav fields in each volume to jump between files (home/prev/next)."
+  ]
+}
