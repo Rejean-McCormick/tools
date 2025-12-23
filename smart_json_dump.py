@@ -2,13 +2,14 @@ import os
 import fnmatch
 import json
 import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 from pathlib import Path
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 import threading
 import subprocess
 import sys
+import queue
 
 # --------------------------------------------------------------------
 # 1. JSON Bundle Helpers
@@ -17,7 +18,7 @@ import sys
 def create_json_volume_structure():
     return {
         "format": "wiki_dump_json",
-        "format_version": 1,
+        "format_version": 1.1,
         "generated_at": datetime.now().isoformat(timespec="minutes"),
         "title": "",
         "root_dir": "",
@@ -33,7 +34,8 @@ def create_json_volume_structure():
             "prev_title": "",
             "next_title": ""
         },
-        "files": []  # list of {rel_path, ext, size_bytes, kind, content}
+        "file_index": [],
+        "files": []
     }
 
 def create_json_index_structure():
@@ -43,22 +45,24 @@ def create_json_index_structure():
         "generated_at": datetime.now().isoformat(timespec="minutes"),
         "repo_name": "",
         "root_dir": "",
-        "volumes": [],  # list of {filename, title, short_title, size_mb, file_count}
+        "volumes": [],
         "instructions": [
             "Open a volume JSON to view file contents.",
-            "Use the nav fields in each volume to jump between files (home/prev/next)."
+            "Use the 'file_index' at the top of each volume for a quick overview.",
+            "Use the nav fields to jump between volumes."
         ]
     }
 
 # --------------------------------------------------------------------
-# 2. Core Logic (The Worker) - JSON OUTPUT
+# 2. Core Logic (The Worker)
 # --------------------------------------------------------------------
 
 class DumpWorker:
     def __init__(self, root_dir: Path, output_dir: Path, max_output_files: int,
                  ignore_txt: bool, ignore_md: bool, only_md: bool,
                  create_index: bool, custom_excludes: List[Path],
-                 log_callback, overwrite_callback):
+                 exclusion_mode: str,
+                 log_callback, overwrite_callback, stop_event):
 
         self.root_dir = root_dir.resolve()
         self.output_dir = output_dir.resolve()
@@ -68,9 +72,11 @@ class DumpWorker:
         self.only_md = only_md
         self.create_index = create_index
         self.custom_excludes = [p.resolve() for p in custom_excludes]
+        self.exclusion_mode = exclusion_mode
 
         self.log = log_callback
         self.ask_overwrite = overwrite_callback
+        self.stop_event = stop_event  # <--- NEW STOP FLAG
 
         # Always-ignore dirs/extensions
         self.ALWAYS_IGNORE_DIRS = {
@@ -79,54 +85,44 @@ class DumpWorker:
             "__pycache__", ".mypy_cache", ".pytest_cache",
             "dist", "build", "coverage", "target", "out",
             "abstract_wiki_architect.egg-info",
-            "WEB-INF", "classes", "lib"
+            "WEB-INF", "classes", "lib", "bin", "obj"
         }
         self.ALWAYS_IGNORE_EXT = {
             ".pyc", ".pyo", ".pyd", ".exe", ".dll", ".so", ".dylib", ".class", ".jar", ".war",
-            ".bin", ".iso", ".img", ".log", ".sqlite", ".db", ".zip", ".gz",
-            ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".lock", ".pdf"
+            ".bin", ".iso", ".img", ".log", ".sqlite", ".db", ".zip", ".gz", ".tar",
+            ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".lock", ".pdf", ".mp4", ".mp3"
         }
 
-        # Gitignore rules:
-        # list of dicts:
-        # {base: Path, pattern: str, neg: bool, dir_only: bool, anchored: bool}
         self.git_rules = self.load_all_gitignores()
 
+    def check_stop(self):
+        if self.stop_event.is_set():
+            raise InterruptedError("Stopped by user.")
+
     # -----------------------------
-    # Gitignore handling (fixed)
+    # Gitignore handling
     # -----------------------------
 
     def _parse_gitignore_line(self, raw: str) -> Optional[Dict[str, Any]]:
         line = raw.rstrip("\n").strip()
-        if not line:
-            return None
-
-        # Allow escaping leading '#' or '!'
-        if line.startswith(r"\#"):
-            line = line[1:]
-        if line.startswith(r"\!"):
-            line = line[1:]
-
-        if line.startswith("#"):
-            return None
+        if not line: return None
+        if line.startswith(r"\#"): line = line[1:]
+        if line.startswith(r"\!"): line = line[1:]
+        if line.startswith("#"): return None
 
         neg = False
         if line.startswith("!"):
             neg = True
             line = line[1:].strip()
-            if not line:
-                return None
+            if not line: return None
 
         dir_only = line.endswith("/")
-        if dir_only:
-            line = line.rstrip("/")
+        if dir_only: line = line.rstrip("/")
 
         anchored = line.startswith("/")
-        if anchored:
-            line = line.lstrip("/")
+        if anchored: line = line.lstrip("/")
 
-        if not line:
-            return None
+        if not line: return None
 
         return {
             "pattern": line,
@@ -141,15 +137,15 @@ class DumpWorker:
 
         count = 0
         for root, dirnames, files in os.walk(self.root_dir, followlinks=True):
+            self.check_stop() # Check stop
             current_dir = Path(root).resolve()
 
-            # Prune recursion into known junk/vendor dirs and user-excluded paths.
+            # Filter directories
             safe_dirs = []
             for d in dirnames:
-                if d in self.ALWAYS_IGNORE_DIRS:
-                    continue
+                if d in self.ALWAYS_IGNORE_DIRS: continue
                 full_dir = (current_dir / d).resolve()
-                if self.is_custom_excluded(full_dir):
+                if self.is_custom_excluded(full_dir) and self.exclusion_mode == "Fully Exclude":
                     continue
                 safe_dirs.append(d)
             dirnames[:] = safe_dirs
@@ -160,11 +156,10 @@ class DumpWorker:
                     with git_path.open("r", encoding="utf-8", errors="replace") as f:
                         for raw in f:
                             parsed = self._parse_gitignore_line(raw)
-                            if not parsed:
-                                continue
+                            if not parsed: continue
                             parsed["base"] = current_dir
                             rules.append(parsed)
-                    count += 1
+                        count += 1
                 except Exception as e:
                     self.log(f"Warn: Could not read {git_path}: {e}")
 
@@ -172,7 +167,6 @@ class DumpWorker:
         return rules
 
     def _rule_applies(self, rule_base: Path, path: Path) -> bool:
-        # A gitignore file only applies to files under its directory.
         try:
             path.resolve().relative_to(rule_base.resolve())
             return True
@@ -189,34 +183,27 @@ class DumpWorker:
         name = path.name
         pat = rule["pattern"]
 
-        # If rule is dir-only: ignore the directory itself AND everything under it.
         if rule["dir_only"]:
             dir_pat = pat
-            if rel_from_base == dir_pat:
-                return True
-            if rel_from_base.startswith(dir_pat + "/"):
-                return True
+            if rel_from_base == dir_pat: return True
+            if rel_from_base.startswith(dir_pat + "/"): return True
             return False
 
-        # Anchored or contains '/' => match against relative path from rule base
         if rule["anchored"] or ("/" in pat):
             return fnmatch.fnmatch(rel_from_base, pat)
 
-        # Otherwise match basename anywhere under base
         return fnmatch.fnmatch(name, pat)
 
     def match_ignore(self, path: Path, is_dir: bool) -> bool:
-        # Implements "last matching rule wins" with '!' negation.
         ignored = False
         for rule in self.git_rules:
-            if not self._rule_applies(rule["base"], path):
-                continue
+            if not self._rule_applies(rule["base"], path): continue
             if self._match_rule(rule, path, is_dir=is_dir):
                 ignored = not rule["neg"]
         return ignored
 
     # -----------------------------
-    # Existing helpers
+    # Helpers
     # -----------------------------
 
     def is_custom_excluded(self, path: Path) -> bool:
@@ -234,6 +221,7 @@ class DumpWorker:
 
     def collect_files_in_folder(self, folder_path: Path, recursive: bool = True) -> List[Path]:
         valid_files: List[Path] = []
+        self.log(f"DEBUG: Entering folder: {folder_path.name}") # VERBOSE
 
         if recursive:
             iterator = os.walk(folder_path, followlinks=True)
@@ -244,58 +232,61 @@ class DumpWorker:
                 return []
 
         for dirpath, dirnames, filenames in iterator:
+            self.check_stop() # Check stop loop
             current_dir = Path(dirpath).resolve()
 
-            # Filter directories in-place to prevent recursion
+            # Filter folders
             safe_dirs = []
             for d in dirnames:
                 full_dir_path = (current_dir / d).resolve()
-
-                if d in self.ALWAYS_IGNORE_DIRS:
+                if d in self.ALWAYS_IGNORE_DIRS: 
+                    self.log(f"DEBUG: Skipping ignored dir: {d}") # VERBOSE
                     continue
-                if self.match_ignore(full_dir_path, is_dir=True):
+                
+                if self.match_ignore(full_dir_path, is_dir=True): 
+                    self.log(f"DEBUG: GitIgnore match dir: {d}") # VERBOSE
                     continue
+                
                 if self.is_custom_excluded(full_dir_path):
-                    continue
+                    if self.exclusion_mode == "Fully Exclude":
+                        self.log(f"DEBUG: Custom Exclude dir: {d}") # VERBOSE
+                        continue
 
                 safe_dirs.append(d)
-
             dirnames[:] = safe_dirs
 
             # Filter files
             for f in filenames:
+                self.check_stop() # Check stop loop (very tight loop)
                 fpath = (current_dir / f).resolve()
                 ext = fpath.suffix.lower()
 
-                if ext in self.ALWAYS_IGNORE_EXT:
-                    continue
-                if self.match_ignore(fpath, is_dir=False):
-                    continue
+                self.log(f"DEBUG: Checking file: {f}") # VERBOSE
+
+                if ext in self.ALWAYS_IGNORE_EXT: continue
+                if self.match_ignore(fpath, is_dir=False): continue
+
                 if self.is_custom_excluded(fpath):
-                    continue
+                    if self.exclusion_mode == "Fully Exclude":
+                        continue
 
                 if self.only_md:
-                    if ext != ".md":
-                        continue
+                    if ext != ".md": continue
                 else:
-                    if self.ignore_txt and ext == ".txt":
-                        continue
-                    if self.ignore_md and ext == ".md":
-                        continue
+                    if self.ignore_txt and ext == ".txt": continue
+                    if self.ignore_md and ext == ".md": continue
 
                 valid_files.append(fpath)
 
         return valid_files
 
     def write_volume_json(self, filename: str, files: List[Path], title: str, nav_context: dict) -> Optional[dict]:
-        if not files:
-            return None
+        if not files: return None
+        self.check_stop()
 
         out_path = self.output_dir / filename
-
-        total_size = sum(self.get_file_size(f) for f in files)
-        size_mb = total_size / (1024 * 1024)
-
+        
+        # Sort files
         try:
             files.sort(key=lambda p: p.relative_to(self.root_dir).as_posix().lower())
         except Exception:
@@ -304,28 +295,52 @@ class DumpWorker:
         volume = create_json_volume_structure()
         volume["title"] = title
         volume["root_dir"] = str(self.root_dir)
+        
+        volume["nav"] = nav_context
+        total_size = 0
 
-        volume["stats"]["file_count"] = len(files)
-        volume["stats"]["total_size_bytes"] = int(total_size)
-        volume["stats"]["total_size_mb"] = float(round(size_mb, 4))
-
-        volume["nav"] = {
-            "home_file": nav_context.get("home_file"),
-            "prev_file": nav_context.get("prev_file"),
-            "next_file": nav_context.get("next_file"),
-            "prev_title": nav_context.get("prev_title", ""),
-            "next_title": nav_context.get("next_title", "")
-        }
+        self.log(f"-> Writing {filename} ({len(files)} files)...") # VERBOSE
 
         for f in files:
+            self.check_stop()
             try:
+                self.log(f"  Reading: {f.name}...") # VERBOSE: SEE EXACT FILE
+
                 rel_path = f.relative_to(self.root_dir).as_posix()
                 ext = f.suffix.lower()
-                size_bytes = self.get_file_size(f)
+                is_excluded_path = self.is_custom_excluded(f)
+                
+                size_bytes = 0
+                line_count = 0
+                content = ""
+                kind = "source"
 
-                content = f.read_text(encoding="utf-8", errors="replace")
+                if is_excluded_path:
+                    if "Names" in self.exclusion_mode:
+                        content = "[NAME_ONLY] Stats and content skipped."
+                        kind = "excluded_name"
+                    else:
+                        size_bytes = self.get_file_size(f)
+                        content = "[METADATA_ONLY] Content skipped."
+                        kind = "excluded_meta"
+                else:
+                    size_bytes = self.get_file_size(f)
+                    if size_bytes > 5_000_000: # 5MB limit
+                        content = f"[SKIPPED] File too large ({size_bytes} bytes)"
+                        kind = "oversized"
+                    else:
+                        content = f.read_text(encoding="utf-8", errors="replace")
+                        line_count = len(content.splitlines())
+                        kind = "markdown" if ext == ".md" else "source"
+                
+                total_size += size_bytes
 
-                kind = "markdown" if ext == ".md" else "source"
+                volume["file_index"].append({
+                    "rel_path": rel_path,
+                    "size_bytes": int(size_bytes),
+                    "line_count": int(line_count),
+                    "kind": kind
+                })
 
                 volume["files"].append({
                     "rel_path": rel_path,
@@ -335,18 +350,24 @@ class DumpWorker:
                     "content": content
                 })
             except Exception as e:
+                self.log(f"  ERROR reading {f.name}: {e}") # VERBOSE ERROR
+                error_name = getattr(f, "name", "unknown")
                 volume["files"].append({
-                    "rel_path": getattr(f, "name", "unknown"),
-                    "ext": f.suffix.lower() if hasattr(f, "suffix") else "",
+                    "rel_path": error_name,
+                    "ext": "",
                     "size_bytes": 0,
                     "kind": "error",
                     "content": f"Error reading file: {e}"
                 })
 
+        size_mb = total_size / (1024 * 1024)
+        volume["stats"]["file_count"] = len(files)
+        volume["stats"]["total_size_bytes"] = int(total_size)
+        volume["stats"]["total_size_mb"] = float(round(size_mb, 4))
+
         try:
             with out_path.open("w", encoding="utf-8") as out:
                 json.dump(volume, out, indent=2, ensure_ascii=False)
-            self.log(f"-> Created: {filename}")
             return {
                 "filename": filename,
                 "title": title,
@@ -355,7 +376,7 @@ class DumpWorker:
                 "short_title": nav_context.get("short_title", title)
             }
         except Exception as e:
-            self.log(f"Error writing {filename}: {e}")
+            self.log(f"Error writing JSON file {filename}: {e}")
             return None
 
     def run(self):
@@ -366,14 +387,12 @@ class DumpWorker:
             ts = datetime.now().strftime("%Y%m%d_%H%M")
             base_name_pattern = f"{repo_name}_{ts}"
 
-            # Create Output Subfolder
             mode_suffix = "_MD_ONLY" if self.only_md else ""
             run_folder_name = f"{base_name_pattern}_JsonDump{mode_suffix}"
             self.output_dir = (self.output_dir / run_folder_name).resolve()
             self.output_dir.mkdir(parents=True, exist_ok=True)
             self.log(f"Output Target: {self.output_dir}")
 
-            # Auto-exclude output folder if it is inside the repo (prevents self-inclusion)
             try:
                 _ = self.output_dir.relative_to(self.root_dir)
                 if self.output_dir not in self.custom_excludes:
@@ -381,28 +400,26 @@ class DumpWorker:
             except Exception:
                 pass
 
-            # ----------------------------------------
-            # STEP 1: GATHER & PLAN
-            # ----------------------------------------
+            # 1. Gather
+            self.check_stop()
             root_files = self.collect_files_in_folder(self.root_dir, recursive=False)
 
             top_level_items = []
             for item in os.listdir(self.root_dir):
                 full_path = (self.root_dir / item).resolve()
                 if full_path.is_dir():
-                    if item in self.ALWAYS_IGNORE_DIRS:
-                        continue
-                    if self.match_ignore(full_path, is_dir=True):
-                        continue
-                    if self.is_custom_excluded(full_path):
+                    if item in self.ALWAYS_IGNORE_DIRS: continue
+                    if self.match_ignore(full_path, is_dir=True): continue
+                    if self.is_custom_excluded(full_path) and self.exclusion_mode == "Fully Exclude":
                         continue
                     top_level_items.append(full_path)
 
             analyzed_folders = []
             for folder in top_level_items:
+                self.check_stop()
                 f_files = self.collect_files_in_folder(folder, recursive=True)
                 if f_files:
-                    size = sum(self.get_file_size(f) for f in f_files)
+                    size = 0 if self.is_custom_excluded(folder) else sum(self.get_file_size(f) for f in f_files)
                     analyzed_folders.append({"name": folder.name, "files": f_files, "size": size})
 
             analyzed_folders.sort(key=lambda x: x["size"], reverse=True)
@@ -419,6 +436,7 @@ class DumpWorker:
 
             start_idx = len(planned_dumps) + 1
 
+            # Planning logic
             if len(analyzed_folders) <= available_slots:
                 for i, folder in enumerate(analyzed_folders):
                     idx = start_idx + i
@@ -457,13 +475,12 @@ class DumpWorker:
                         "short_title": "Others"
                     })
 
-            # ----------------------------------------
-            # STEP 2: GENERATE VOLUMES
-            # ----------------------------------------
+            # 2. Generate
             self.log(f"Generating {len(planned_dumps)} content volumes...")
             generated_meta = []
 
             for i, dump in enumerate(planned_dumps):
+                self.check_stop()
                 prev_d = planned_dumps[i - 1] if i > 0 else None
                 next_d = planned_dumps[i + 1] if i < len(planned_dumps) - 1 else None
 
@@ -480,12 +497,9 @@ class DumpWorker:
                 if meta:
                     generated_meta.append(meta)
 
-            # ----------------------------------------
-            # STEP 3: GENERATE INDEX
-            # ----------------------------------------
+            # 3. Index
             if self.create_index:
                 index_path = self.output_dir / index_filename
-
                 should_write = True
                 if index_path.exists():
                     self.log(f"Index file {index_filename} already exists.")
@@ -515,13 +529,13 @@ class DumpWorker:
                     self.log(f"-> Created Master Index: {index_filename}")
 
             self.log(f"\nSUCCESS! Completed in:\n{self.output_dir}")
-            messagebox.showinfo("Done", f"JSON dump generated successfully!\n\nFolder:\n{self.output_dir}")
 
+        except InterruptedError:
+            self.log("\n!!! PROCESS STOPPED BY USER !!!")
         except Exception as e:
             self.log(f"ERROR: {e}")
             import traceback
             traceback.print_exc()
-            messagebox.showerror("Error", str(e))
 
 # --------------------------------------------------------------------
 # 3. GUI Application
@@ -530,10 +544,12 @@ class DumpWorker:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Smart Wiki Dumper v10 (JSON)")
-        self.geometry("600x840")
+        self.title("Smart Wiki Dumper v12 (Verbose + Stop)")
+        self.geometry("600x900") 
 
         self.last_output_dir: Optional[str] = None
+        self.log_queue = queue.Queue()
+        self.stop_event = threading.Event() # <--- STOP FLAG
 
         pad_opts = {"padx": 10, "pady": 5}
 
@@ -562,6 +578,7 @@ class App(tk.Tk):
         self.frame_excludes = tk.LabelFrame(self, text="Custom Path Exclusions", padx=10, pady=10)
         self.frame_excludes.pack(fill="x", **pad_opts)
 
+        # Exclude Qty
         tk.Label(self.frame_excludes, text="Quantity to exclude:").grid(row=0, column=0, sticky="w")
         self.spin_exclude_qty = tk.Spinbox(
             self.frame_excludes, from_=0, to=5, width=5, command=self.update_exclusion_widgets
@@ -569,9 +586,25 @@ class App(tk.Tk):
         self.spin_exclude_qty.delete(0, "end")
         self.spin_exclude_qty.insert(0, 0)
         self.spin_exclude_qty.grid(row=0, column=1, sticky="w", padx=5)
+        
+        # --- NEW DROPDOWN ---
+        tk.Label(self.frame_excludes, text="Exclusion Mode:").grid(row=1, column=0, sticky="w", pady=5)
+        self.var_exclude_mode = tk.StringVar(value="Fully Exclude")
+        self.combo_exclude = ttk.Combobox(
+            self.frame_excludes, 
+            textvariable=self.var_exclude_mode, 
+            state="readonly",
+            width=30
+        )
+        self.combo_exclude['values'] = (
+            "Fully Exclude", 
+            "Index w/ Metadata (Skip Content)", 
+            "List Folders & Files Names"
+        )
+        self.combo_exclude.grid(row=1, column=1, columnspan=2, sticky="w", padx=5)
 
         self.frame_dynamic_excludes = tk.Frame(self.frame_excludes)
-        self.frame_dynamic_excludes.grid(row=1, column=0, columnspan=3, sticky="we", pady=5)
+        self.frame_dynamic_excludes.grid(row=2, column=0, columnspan=3, sticky="we", pady=5)
         self.exclusion_entries = []
 
         # --- Filters & Index Options ---
@@ -616,6 +649,19 @@ class App(tk.Tk):
         )
         self.btn_run.pack(fill="x")
 
+        # --- STOP BUTTON ---
+        self.btn_stop = tk.Button(
+            actions,
+            text="STOP OPERATION",
+            bg="#f44336",
+            fg="white",
+            font=("Arial", 10, "bold"),
+            height=1,
+            state="disabled",
+            command=self.stop_process
+        )
+        self.btn_stop.pack(fill="x", pady=(5,0))
+
         self.btn_open_dest = tk.Button(
             actions,
             text="OPEN DESTINATION FOLDER",
@@ -628,6 +674,19 @@ class App(tk.Tk):
         # --- Log ---
         self.txt_log = scrolledtext.ScrolledText(self, height=12)
         self.txt_log.pack(fill="both", expand=True, padx=10, pady=10)
+
+        # START LOG QUEUE CHECKER
+        self.check_log_queue()
+
+    def check_log_queue(self):
+        while not self.log_queue.empty():
+            try:
+                msg = self.log_queue.get_nowait()
+                self.txt_log.insert(tk.END, msg + "\n")
+                self.txt_log.see(tk.END)
+            except queue.Empty:
+                pass
+        self.after(100, self.check_log_queue)
 
     def open_destination_folder(self):
         if not self.last_output_dir or not os.path.isdir(self.last_output_dir):
@@ -692,12 +751,26 @@ class App(tk.Tk):
             self.entry_out.delete(0, tk.END)
             self.entry_out.insert(0, d)
 
-    def log(self, msg):
-        self.txt_log.insert(tk.END, msg + "\n")
-        self.txt_log.see(tk.END)
+    def log_thread_safe(self, msg):
+        self.log_queue.put(msg)
 
-    def safe_ask_overwrite(self, filename):
-        return messagebox.askyesno("File Exists", f"The file '{filename}' already exists.\n\nOverwrite it?")
+    def ask_overwrite_thread_safe(self, filename):
+        event = threading.Event()
+        result_container = {"value": False}
+        def show_dialog():
+            result_container["value"] = messagebox.askyesno(
+                "File Exists", 
+                f"The file '{filename}' already exists.\n\nOverwrite it?"
+            )
+            event.set()
+        self.after(0, show_dialog)
+        event.wait()
+        return result_container["value"]
+
+    def stop_process(self):
+        self.stop_event.set()
+        self.log_thread_safe("\n... Stopping requested ...")
+        self.btn_stop.config(state="disabled", text="Stopping...")
 
     def start_thread(self):
         repo = self.entry_repo.get()
@@ -720,6 +793,8 @@ class App(tk.Tk):
         self.last_output_dir = None
         self.btn_open_dest.config(state="disabled")
         self.btn_run.config(state="disabled", text="Running...")
+        self.btn_stop.config(state="normal", text="STOP OPERATION") # Enable Stop
+        self.stop_event.clear() # Reset stop flag
         self.txt_log.delete(1.0, tk.END)
 
         t = threading.Thread(
@@ -733,13 +808,19 @@ class App(tk.Tk):
                 self.var_only_md.get(),
                 self.var_create_index.get(),
                 custom_excludes_paths,
+                self.var_exclude_mode.get(),
             ),
+            daemon=True
         )
         t.start()
 
-    def run_process(self, repo, out, max_files, ign_txt, ign_md, only_md, create_index, custom_excludes):
+    def run_process(self, repo, out, max_files, ign_txt, ign_md, only_md, create_index, custom_excludes, exclude_mode):
         worker = DumpWorker(
-            repo, out, max_files, ign_txt, ign_md, only_md, create_index, custom_excludes, self.log, self.safe_ask_overwrite
+            repo, out, max_files, ign_txt, ign_md, only_md, create_index, custom_excludes, 
+            exclude_mode,
+            self.log_thread_safe,
+            self.ask_overwrite_thread_safe,
+            self.stop_event # Pass stop event
         )
         worker.run()
 
@@ -750,6 +831,11 @@ class App(tk.Tk):
             self.last_output_dir = out_dir_str
             self.btn_open_dest.config(state="normal")
             self.btn_run.config(state="normal", text="GENERATE JSON DUMP & INDEX")
+            self.btn_stop.config(state="disabled", text="STOP OPERATION")
+            
+            # Only show success if not stopped
+            if not self.stop_event.is_set():
+                messagebox.showinfo("Done", f"JSON dump generated successfully!\n\nFolder:\n{out_dir_str}")
 
         self.after(0, _finish)
 
