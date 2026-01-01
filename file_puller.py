@@ -1,7 +1,7 @@
 import tkinter as tk
 from tkinter import scrolledtext, messagebox, filedialog
 import os
-import subprocess  # <--- NEW IMPORT
+import subprocess
 
 def browse_base_path():
     """Opens a directory selector and sets the base path entry."""
@@ -43,7 +43,6 @@ def open_in_npp():
         messagebox.showerror("Error", f"Notepad++ not found at:\n{npp_path}")
         return
 
-    # Filter for files that actually exist before trying to open them
     existing_files = [f for f in files_to_open if os.path.isfile(f)]
     
     if not existing_files:
@@ -51,8 +50,6 @@ def open_in_npp():
         return
 
     try:
-        # We pass the executable path + the list of files as arguments
-        # This opens all files in one Notepad++ instance
         cmd = [npp_path] + existing_files
         subprocess.Popen(cmd)
         status_label.config(text=f"Opened {len(existing_files)} files in Notepad++", fg="green")
@@ -61,7 +58,7 @@ def open_in_npp():
 
 def process_paths():
     """Reads paths from the input area and dumps content to the log window."""
-    paths = get_file_list() # Re-using the helper function
+    paths = get_file_list()
     
     if not paths:
         messagebox.showwarning("Input Error", "Please enter at least one file path.")
@@ -69,7 +66,7 @@ def process_paths():
 
     # Prepare Output Window
     log_window.config(state=tk.NORMAL)
-    log_window.delete(1.0, tk.END) # Clear previous output
+    log_window.delete(1.0, tk.END) 
     
     success_count = 0
     
@@ -101,6 +98,59 @@ def process_paths():
     log_window.config(state=tk.DISABLED)
     status_label.config(text=f"Processed {len(paths)} paths. Loaded {success_count} successfully.", fg="blue")
 
+# --- NEW FUNCTION: EXPORT TO FILE ---
+def export_to_file():
+    """Reads paths and writes aggregated content to a user-selected .txt file."""
+    paths = get_file_list()
+
+    if not paths:
+        messagebox.showwarning("Input Error", "Please enter at least one file path.")
+        return
+
+    # Ask user where to save
+    save_path = filedialog.asksaveasfilename(
+        defaultextension=".txt",
+        filetypes=[("Text Files", "*.txt"), ("All Files", "*.*")],
+        title="Save File Dump As..."
+    )
+
+    if not save_path:
+        return  # User cancelled
+
+    success_count = 0
+    
+    try:
+        with open(save_path, 'w', encoding='utf-8') as outfile:
+            for full_path in paths:
+                filename = os.path.basename(full_path)
+                
+                # Write Header
+                outfile.write(f"\n{'='*10} FILE: {filename} {'='*10}\n")
+                outfile.write(f"Path: {full_path}\n\n")
+                
+                try:
+                    if os.path.isdir(full_path):
+                        outfile.write("[Skipped: This is a folder, not a file]\n")
+                    else:
+                        with open(full_path, 'r', encoding='utf-8') as infile:
+                            content = infile.read()
+                            outfile.write(content + "\n")
+                            success_count += 1
+                except FileNotFoundError:
+                    outfile.write("[Error: File not found]\n")
+                except PermissionError:
+                    outfile.write("[Error: Permission denied]\n")
+                except Exception as e:
+                    outfile.write(f"[Error: {str(e)}]\n")
+                
+                outfile.write("-" * 40 + "\n")
+
+        status_label.config(text=f"Export successful! Saved {success_count} files to {os.path.basename(save_path)}", fg="green")
+        messagebox.showinfo("Export Complete", f"Successfully saved dump to:\n{save_path}")
+
+    except Exception as e:
+        messagebox.showerror("Export Error", f"Failed to write file:\n{str(e)}")
+
 def copy_to_clipboard():
     """Copies output log to clipboard."""
     content = log_window.get(1.0, tk.END).strip()
@@ -117,7 +167,7 @@ def clear_input():
 # --- GUI Setup ---
 root = tk.Tk()
 root.title("File Content Aggregator")
-root.geometry("800x750")
+root.geometry("850x750") # Slightly wider to accommodate new button
 
 # 1. Input Area (Top)
 input_frame = tk.LabelFrame(root, text="File Selection", padx=10, pady=10)
@@ -125,7 +175,7 @@ input_frame.pack(fill=tk.BOTH, expand=False, padx=10, pady=5)
 
 # --- Base Path Section ---
 base_path_frame = tk.Frame(input_frame)
-base_path_frame.pack(fill=tk.X, pady=(0, 5)) # Fixed packing error here
+base_path_frame.pack(fill=tk.X, pady=(0, 5))
 
 tk.Label(base_path_frame, text="Base Path (Optional): ").pack(side=tk.LEFT)
 
@@ -149,16 +199,19 @@ btn_frame.pack(fill=tk.X, padx=10)
 process_btn = tk.Button(btn_frame, text="Process Paths", command=process_paths, bg="#dddddd", height=2, width=15)
 process_btn.pack(side=tk.LEFT, padx=(0, 5))
 
-# --- NEW BUTTON ---
 npp_btn = tk.Button(btn_frame, text="Open in Notepad++", command=open_in_npp, bg="#fffacd", height=2, width=18)
 npp_btn.pack(side=tk.LEFT, padx=5)
-# ------------------
 
 clear_btn = tk.Button(btn_frame, text="Clear Input", command=clear_input, height=2)
 clear_btn.pack(side=tk.LEFT, padx=5)
 
 copy_btn = tk.Button(btn_frame, text="Copy Output", command=copy_to_clipboard, bg="#add8e6", height=2, width=15)
 copy_btn.pack(side=tk.RIGHT)
+
+# --- NEW BUTTON ---
+export_btn = tk.Button(btn_frame, text="Export to .txt", command=export_to_file, bg="#98fb98", height=2, width=15)
+export_btn.pack(side=tk.RIGHT, padx=5)
+# ------------------
 
 # 3. Output Log (Bottom)
 output_frame = tk.LabelFrame(root, text="Output Log", padx=10, pady=10)

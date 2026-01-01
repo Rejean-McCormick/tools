@@ -87,11 +87,28 @@ class DumpWorker:
             "abstract_wiki_architect.egg-info",
             "WEB-INF", "classes", "lib", "bin", "obj"
         }
+        
         self.ALWAYS_IGNORE_EXT = {
             ".pyc", ".pyo", ".pyd", ".exe", ".dll", ".so", ".dylib", ".class", ".jar", ".war",
             ".bin", ".iso", ".img", ".log", ".sqlite", ".db", ".zip", ".gz", ".tar",
             ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".lock", ".pdf", ".mp4", ".mp3"
         }
+
+        # --- MODIFICATION START: Explicit File Name Ignores ---
+        self.ALWAYS_IGNORE_FILES = {
+            "package-lock.json",
+            "yarn.lock",
+            "pnpm-lock.yaml",
+            "composer.lock",
+            "Gemfile.lock",
+            "poetry.lock",
+            "Cargo.lock",
+            ".DS_Store",
+            "Thumbs.db",
+            # Add your empty placeholders here if you want to auto-exclude them:
+            "Entity", "Fact", "Modifier", "Predicate", "Property" 
+        }
+        # --- MODIFICATION END ---
 
         self.git_rules = self.load_all_gitignores()
 
@@ -262,6 +279,12 @@ class DumpWorker:
                 ext = fpath.suffix.lower()
 
                 self.log(f"DEBUG: Checking file: {f}") # VERBOSE
+
+                # --- MODIFICATION START: Check specific ignore filenames ---
+                if f in self.ALWAYS_IGNORE_FILES:
+                    self.log(f"DEBUG: Skipping lock/system file: {f}")
+                    continue
+                # --- MODIFICATION END ---
 
                 if ext in self.ALWAYS_IGNORE_EXT: continue
                 if self.match_ignore(fpath, is_dir=False): continue
