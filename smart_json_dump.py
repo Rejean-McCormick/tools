@@ -10,7 +10,7 @@ import threading
 import subprocess
 import sys
 import queue
-import concurrent.futures  # <--- ADDED FOR PARALLEL PROCESSING
+import concurrent.futures
 
 # --------------------------------------------------------------------
 # 1. JSON Bundle Helpers
@@ -60,7 +60,7 @@ def create_json_index_structure():
 
 class DumpWorker:
     def __init__(self, root_dir: Path, output_dir: Path, max_output_files: int,
-                 ignore_txt: bool, ignore_md: bool, only_md: bool,
+                 ignore_txt: bool, ignore_md: bool,
                  create_index: bool, custom_excludes: List[Path],
                  exclusion_mode: str,
                  log_callback, overwrite_callback, stop_event):
@@ -70,7 +70,7 @@ class DumpWorker:
         self.max_output_files = max(2, max_output_files)
         self.ignore_txt = ignore_txt
         self.ignore_md = ignore_md
-        self.only_md = only_md
+        # Removed self.only_md
         self.create_index = create_index
         self.custom_excludes = [p.resolve() for p in custom_excludes]
         self.exclusion_mode = exclusion_mode
@@ -78,6 +78,9 @@ class DumpWorker:
         self.log = log_callback
         self.ask_overwrite = overwrite_callback
         self.stop_event = stop_event 
+
+        # Tracking for the new report request
+        self.tracked_custom_exclusions: List[str] = []
 
         # Always-ignore dirs/extensions
         self.ALWAYS_IGNORE_DIRS = {
@@ -115,7 +118,7 @@ class DumpWorker:
             raise InterruptedError("Stopped by user.")
 
     # -----------------------------
-    # Gitignore handling 
+    # Gitignore / Smartignore handling 
     # -----------------------------
 
     def _parse_gitignore_line(self, raw: str) -> Optional[Dict[str, Any]]:
@@ -154,7 +157,7 @@ class DumpWorker:
 
     def load_all_gitignores(self) -> list:
         rules = []
-        self.log("-> Scanning for .gitignore files...")
+        self.log("-> Scanning for .gitignore and .smartignore files...")
 
         count = 0
         for root, dirnames, files in os.walk(self.root_dir, followlinks=True):
@@ -165,35 +168,36 @@ class DumpWorker:
             safe_dirs = []
             for d in dirnames:
                 if d in self.ALWAYS_IGNORE_DIRS: continue
-                # Optimization: Skip resolving if not strictly necessary for simple ignore check
                 full_dir = current_dir / d
                 if self.is_custom_excluded(full_dir) and self.exclusion_mode == "Fully Exclude":
                     continue
                 safe_dirs.append(d)
             dirnames[:] = safe_dirs
 
-            if ".gitignore" in files:
-                git_path = current_dir / ".gitignore"
-                try:
-                    with git_path.open("r", encoding="utf-8-sig", errors="replace") as f:
-                        for raw in f:
-                            parsed = self._parse_gitignore_line(raw)
-                            if not parsed: continue
-                            parsed["base"] = current_dir
-                            rules.append(parsed)
-                        count += 1
-                except Exception:
-                    pass
+            # ADDED: Check for both .gitignore and .smartignore
+            ignore_files_to_check = [".gitignore", ".smartignore"]
 
-        self.log(f"-> Loaded {count} .gitignore files ({len(rules)} rules).")
+            for ignore_file in ignore_files_to_check:
+                if ignore_file in files:
+                    git_path = current_dir / ignore_file
+                    try:
+                        with git_path.open("r", encoding="utf-8-sig", errors="replace") as f:
+                            for raw in f:
+                                parsed = self._parse_gitignore_line(raw)
+                                if not parsed: continue
+                                parsed["base"] = current_dir
+                                rules.append(parsed)
+                            count += 1
+                    except Exception:
+                        pass
+
+        self.log(f"-> Loaded {count} ignore files ({len(rules)} rules).")
         return rules
 
     def _rule_applies(self, rule_base: Path, path: Path) -> bool:
-        # Optimization: Check if path string starts with base string to avoid Path calculation overhead
         return str(path).startswith(str(rule_base))
 
     def _match_rule(self, rule: Dict[str, Any], path: Path, is_dir: bool) -> bool:
-        # Optimization: Use string manipulation where possible
         base = rule["base"]
         try:
             rel_from_base = path.relative_to(base).as_posix()
@@ -216,7 +220,6 @@ class DumpWorker:
 
     def match_ignore(self, path: Path, is_dir: bool) -> bool:
         ignored = False
-        # Reverse iterate to prioritize deeper/newer rules (approximation)
         for rule in self.git_rules:
             if not self._rule_applies(rule["base"], path): continue
             if self._match_rule(rule, path, is_dir=is_dir):
@@ -228,10 +231,8 @@ class DumpWorker:
     # -----------------------------
 
     def is_custom_excluded(self, path: Path) -> bool:
-        # Optimization: Avoid heavy path resolution if list is empty
         if not self.custom_excludes: return False
         
-        # We rely on path already being resolved by caller for speed
         for exc in self.custom_excludes:
             if path == exc or exc in path.parents:
                 return True
@@ -245,7 +246,6 @@ class DumpWorker:
 
     def collect_files_in_folder(self, folder_path: Path, recursive: bool = True) -> List[Path]:
         valid_files: List[Path] = []
-        # LOGGING REMOVED FOR SPEED
         
         if recursive:
             iterator = os.walk(folder_path, followlinks=True)
@@ -269,6 +269,13 @@ class DumpWorker:
                 if self.match_ignore(full_dir_path, is_dir=True): continue
                 
                 if self.is_custom_excluded(full_dir_path):
+                    # Track this exclusion
+                    try:
+                        rel = full_dir_path.relative_to(self.root_dir)
+                    except:
+                        rel = full_dir_path
+                    self.tracked_custom_exclusions.append(str(rel) + " (DIR)")
+                    
                     if self.exclusion_mode == "Fully Exclude": continue
                 
                 safe_dirs.append(d)
@@ -278,24 +285,27 @@ class DumpWorker:
             for f in filenames:
                 fpath = current_dir / f
                 
-                # OPTIMIZATION: Check extensions string-wise before object creation if possible, 
-                # but pathlib suffix is reasonably fast.
                 ext = fpath.suffix.lower()
 
                 if f in self.ALWAYS_IGNORE_FILES: continue
                 if ext in self.ALWAYS_IGNORE_EXT: continue
                 
-                # Expensive checks last
                 if self.match_ignore(fpath, is_dir=False): continue
                 
+                # Check Custom Exclusions
                 if self.is_custom_excluded(fpath):
+                    # Track this exclusion
+                    try:
+                        rel = fpath.relative_to(self.root_dir)
+                    except:
+                        rel = fpath
+                    self.tracked_custom_exclusions.append(str(rel))
+
                     if self.exclusion_mode == "Fully Exclude": continue
 
-                if self.only_md:
-                    if ext != ".md": continue
-                else:
-                    if self.ignore_txt and ext == ".txt": continue
-                    if self.ignore_md and ext == ".md": continue
+                # REMOVED: "Scan ONLY .md files" logic
+                if self.ignore_txt and ext == ".txt": continue
+                if self.ignore_md and ext == ".md": continue
 
                 valid_files.append(fpath)
 
@@ -333,7 +343,6 @@ class DumpWorker:
                     content = f"[SKIPPED] File too large ({size_bytes} bytes)"
                     kind = "oversized"
                 else:
-                    # The slow part: reading disk
                     content = f.read_text(encoding="utf-8", errors="replace")
                     line_count = len(content.splitlines())
                     kind = "markdown" if ext == ".md" else "source"
@@ -355,7 +364,6 @@ class DumpWorker:
                 "size_bytes": size_bytes
             }
         except Exception as e:
-            # Error handling
             error_name = f.name
             return {
                 "file_index_entry": {
@@ -395,19 +403,14 @@ class DumpWorker:
         
         self.log(f"-> Processing {filename} ({len(files)} files)...")
 
-        # ---------------------------------------------------------
-        # OPTIMIZATION: Parallel Processing using ThreadPoolExecutor
-        # ---------------------------------------------------------
-        # We cap workers to avoid OS limits, but file IO usually handles 20-50 well.
         max_workers = min(50, len(files) + 1)
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Map returns results in the order of input 'files', so sorting is preserved
             results = executor.map(self._process_file_content, files)
             
             for res in results:
                 self.check_stop()
-                if res is None: continue # stopped
+                if res is None: continue
                 
                 volume["file_index"].append(res["file_index_entry"])
                 volume["files"].append(res["file_content_entry"])
@@ -422,12 +425,17 @@ class DumpWorker:
             self.log(f"   Writing JSON to disk...")
             with out_path.open("w", encoding="utf-8") as out:
                 json.dump(volume, out, indent=2, ensure_ascii=False)
+            
+            # Return list of files contained in this volume for the Master Index
+            contained_files = [entry["rel_path"] for entry in volume["file_index"]]
+
             return {
                 "filename": filename,
                 "title": title,
                 "size_mb": size_mb,
                 "file_count": len(files),
-                "short_title": nav_context.get("short_title", title)
+                "short_title": nav_context.get("short_title", title),
+                "contained_files": contained_files 
             }
         except Exception as e:
             self.log(f"Error writing JSON file {filename}: {e}")
@@ -441,8 +449,8 @@ class DumpWorker:
             ts = datetime.now().strftime("%Y%m%d_%H%M")
             base_name_pattern = f"{repo_name}_{ts}"
 
-            mode_suffix = "_MD_ONLY" if self.only_md else ""
-            run_folder_name = f"{base_name_pattern}_JsonDump{mode_suffix}"
+            # Removed suffix logic for MD only
+            run_folder_name = f"{base_name_pattern}_JsonDump"
             self.output_dir = (self.output_dir / run_folder_name).resolve()
             self.output_dir.mkdir(parents=True, exist_ok=True)
             self.log(f"Output Target: {self.output_dir}")
@@ -465,14 +473,21 @@ class DumpWorker:
                 if full_path.is_dir():
                     if item in self.ALWAYS_IGNORE_DIRS: continue
                     if self.match_ignore(full_path, is_dir=True): continue
-                    if self.is_custom_excluded(full_path) and self.exclusion_mode == "Fully Exclude":
-                        continue
+                    
+                    if self.is_custom_excluded(full_path):
+                        # Track top level dir exclusion
+                        try:
+                            rel = full_path.relative_to(self.root_dir)
+                        except:
+                            rel = full_path
+                        self.tracked_custom_exclusions.append(str(rel) + " (DIR)")
+                        if self.exclusion_mode == "Fully Exclude": continue
+                    
                     top_level_items.append(full_path)
 
             analyzed_folders = []
             for i, folder in enumerate(top_level_items):
                 self.check_stop()
-                # Simple progress log every 5 folders to keep UI alive without spamming
                 if i % 5 == 0:
                     self.log(f"   Scanning folder: {folder.name}...")
                     
@@ -486,7 +501,7 @@ class DumpWorker:
             available_slots = self.max_output_files
             planned_dumps = []
 
-            index_filename = "NoteBookIndex.json"
+            index_filename = "Index.json"
 
             if root_files:
                 available_slots -= 1
@@ -495,7 +510,6 @@ class DumpWorker:
 
             start_idx = len(planned_dumps) + 1
 
-            # Planning logic
             if len(analyzed_folders) <= available_slots:
                 for i, folder in enumerate(analyzed_folders):
                     idx = start_idx + i
@@ -579,13 +593,32 @@ class DumpWorker:
                             "title": meta["title"],
                             "short_title": meta.get("short_title", meta["title"]),
                             "size_mb": float(round(meta["size_mb"], 4)),
-                            "file_count": int(meta.get("file_count", 0))
+                            "file_count": int(meta.get("file_count", 0)),
+                            # Add the contained files to the index
+                            "contained_files": meta.get("contained_files", [])
                         })
 
                     with index_path.open("w", encoding="utf-8") as f:
                         json.dump(index_data, f, indent=2, ensure_ascii=False)
 
                     self.log(f"-> Created Master Index: {index_filename}")
+
+            # 4. Generate Excluded Files Report
+            if self.tracked_custom_exclusions:
+                report_path = self.output_dir / "ExcludedFilesReport.txt"
+                try:
+                    unique_exclusions = sorted(list(set(self.tracked_custom_exclusions)))
+                    with report_path.open("w", encoding="utf-8") as rf:
+                        rf.write("======================================================\n")
+                        rf.write(f" EXCLUDED FILES REPORT - {datetime.now()}\n")
+                        rf.write(" The following files were excluded based on 'Custom Path Exclusions'\n")
+                        rf.write(" (This does not include files excluded by .gitignore/.smartignore)\n")
+                        rf.write("======================================================\n\n")
+                        for line in unique_exclusions:
+                            rf.write(f"{line}\n")
+                    self.log(f"-> Created Exclusion Report: ExcludedFilesReport.txt")
+                except Exception as e:
+                    self.log(f"Could not write exclusion report: {e}")
 
             self.log(f"\nSUCCESS! Completed in:\n{self.output_dir}")
 
@@ -603,7 +636,7 @@ class DumpWorker:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Smart Wiki Dumper v12 (Optimized)")
+        self.title("Smart Wiki Dumper v12.2 (SmartIgnore Added)")
         self.geometry("600x900")
 
         self.last_output_dir: Optional[str] = None
@@ -670,7 +703,6 @@ class App(tk.Tk):
 
         self.var_ignore_txt = tk.BooleanVar(value=False)
         self.var_ignore_md = tk.BooleanVar(value=False)
-        self.var_only_md = tk.BooleanVar(value=False)
         self.var_create_index = tk.BooleanVar(value=True)
 
         tk.Checkbutton(opts_frame, text="Ignore .txt files", variable=self.var_ignore_txt).grid(
@@ -679,14 +711,12 @@ class App(tk.Tk):
         self.chk_md = tk.Checkbutton(opts_frame, text="Ignore .md files", variable=self.var_ignore_md)
         self.chk_md.grid(row=0, column=1, sticky="w", padx=10)
 
-        tk.Checkbutton(
-            opts_frame, text="Scan ONLY .md files", variable=self.var_only_md, command=self.toggle_md_mode
-        ).grid(row=1, column=0, sticky="w", padx=10, pady=5)
+        # REMOVED: "Scan ONLY .md files" Checkbutton
 
         tk.Frame(opts_frame, height=1, bg="grey").grid(row=2, column=0, columnspan=2, sticky="we", pady=5)
         tk.Checkbutton(
             opts_frame,
-            text="Create Master Index (NoteBookIndex.json)",
+            text="Create Master Index (Index.json)",
             variable=self.var_create_index,
             font=("Arial", 9, "bold"),
         ).grid(row=3, column=0, columnspan=2, sticky="w", padx=10)
@@ -785,13 +815,6 @@ class App(tk.Tk):
             e.delete(0, tk.END)
             e.insert(0, d)
 
-    def toggle_md_mode(self):
-        if self.var_only_md.get():
-            self.var_ignore_md.set(False)
-            self.chk_md.config(state="disabled")
-        else:
-            self.chk_md.config(state="normal")
-
     def browse_repo(self):
         d = filedialog.askdirectory()
         if d:
@@ -862,7 +885,7 @@ class App(tk.Tk):
                 max_files,
                 self.var_ignore_txt.get(),
                 self.var_ignore_md.get(),
-                self.var_only_md.get(),
+                # Removed var_only_md
                 self.var_create_index.get(),
                 custom_excludes_paths,
                 self.var_exclude_mode.get(),
@@ -871,9 +894,11 @@ class App(tk.Tk):
         )
         t.start()
 
-    def run_process(self, repo, out, max_files, ign_txt, ign_md, only_md, create_index, custom_excludes, exclude_mode):
+    def run_process(self, repo, out, max_files, ign_txt, ign_md, create_index, custom_excludes, exclude_mode):
         worker = DumpWorker(
-            repo, out, max_files, ign_txt, ign_md, only_md, create_index, custom_excludes,
+            repo, out, max_files, ign_txt, ign_md, 
+            # Removed only_md arg
+            create_index, custom_excludes,
             exclude_mode,
             self.log_thread_safe,
             self.ask_overwrite_thread_safe,
