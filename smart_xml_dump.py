@@ -86,12 +86,14 @@ class DumpWorker:
             ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".lock", ".pdf", ".mp4", ".mp3"
         }
 
-        # Restored parity items that were in JSON version (optional but requested earlier)
         self.ALWAYS_IGNORE_FILES = {
             "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "composer.lock",
             "Gemfile.lock", "poetry.lock", "Cargo.lock", ".DS_Store", "Thumbs.db",
             "Entity", "Fact", "Modifier", "Predicate", "Property"
         }
+
+        # Name chosen to sort first + be explicit
+        self.INSTRUCTIONS_FILENAME = "00_START_HERE.instructions.md"
 
         self.git_rules = self.load_all_gitignores()
 
@@ -153,7 +155,6 @@ class DumpWorker:
             self.check_stop()
             current_dir = Path(root).resolve()
 
-            # Filter directories (add parity: respect custom excludes in Fully Exclude mode)
             safe_dirs = []
             for d in dirnames:
                 if d in self.ALWAYS_IGNORE_DIRS:
@@ -164,8 +165,7 @@ class DumpWorker:
                 safe_dirs.append(d)
             dirnames[:] = safe_dirs
 
-            ignore_files_to_check = [".gitignore", ".smartignore"]
-            for ignore_file in ignore_files_to_check:
+            for ignore_file in [".gitignore", ".smartignore"]:
                 if ignore_file in files:
                     git_path = current_dir / ignore_file
                     try:
@@ -269,8 +269,6 @@ class DumpWorker:
                         rel = full_dir_path
                     self.tracked_custom_exclusions.append(str(rel) + " (DIR)")
 
-                    # If Fully Exclude, do not descend.
-                    # If "List Names" mode, we DO descend so we can list contained files.
                     if self.exclusion_mode == "Fully Exclude":
                         continue
 
@@ -312,7 +310,6 @@ class DumpWorker:
     # -----------------------------
 
     def _process_file_content(self, f: Path):
-        """Helper to run in thread pool"""
         if self.stop_event.is_set():
             return None
 
@@ -326,20 +323,16 @@ class DumpWorker:
             content = ""
             kind = "source"
 
-            # Exclusion modes
             if is_excluded_path:
                 if "Names" in self.exclusion_mode:
-                    # List Folders & Files Names Mode
                     content = ""
                     kind = "list_name_only"
                     size_bytes = 0
                 else:
-                    # Index w/ Metadata Mode
                     size_bytes = self.get_file_size(f)
                     content = ""
                     kind = "metadata_only"
             else:
-                # Normal mode
                 size_bytes = self.get_file_size(f)
                 if size_bytes > 5_000_000:
                     content = f"SKIPPED_OVERSIZED: {size_bytes} bytes"
@@ -403,7 +396,6 @@ class DumpWorker:
                 out.write('<?xml version="1.0" encoding="UTF-8"?>\n')
                 out.write('<volume>\n')
 
-                # 1. Metadata
                 out.write('  <meta>\n')
                 out.write(f'    <generated_at>{datetime.now().isoformat()}</generated_at>\n')
                 out.write(f'    <title>{escape_xml_body(title)}</title>\n')
@@ -411,7 +403,6 @@ class DumpWorker:
                 out.write(f'    <file_count>{len(files)}</file_count>\n')
                 out.write(f'    <total_size_mb>{round(size_mb, 4)}</total_size_mb>\n')
 
-                # Optional nav parity fields
                 if nav_context.get("home_file"):
                     out.write(f'    <home>{escape_xml_body(nav_context["home_file"])}</home>\n')
                 if nav_context.get("next_file"):
@@ -422,10 +413,8 @@ class DumpWorker:
                 out.write(f'    <prev_title>{escape_xml_body(nav_context.get("prev_title", ""))}</prev_title>\n')
                 out.write(f'    <next_title>{escape_xml_body(nav_context.get("next_title", ""))}</next_title>\n')
                 out.write(f'    <short_title>{escape_xml_body(nav_context.get("short_title", ""))}</short_title>\n')
-
                 out.write('  </meta>\n')
 
-                # 2. File Index (TOC) - FIXED: attribute-safe escaping + added lines
                 out.write('  <file_index>\n')
                 for f_data in file_data_list:
                     p = escape_xml_attr(f_data["rel_path"])
@@ -435,26 +424,20 @@ class DumpWorker:
                     )
                 out.write('  </file_index>\n')
 
-                # 3. Content
                 out.write('  <files>\n')
                 for f_data in file_data_list:
                     path_attr = escape_xml_attr(f_data["rel_path"])
                     kind_attr = escape_xml_attr(f_data["kind"])
-
                     out.write(
                         f'    <file path="{path_attr}" size="{f_data["size_bytes"]}" '
                         f'lines="{f_data["line_count"]}" kind="{kind_attr}">\n'
                     )
-
-                    escaped_body = escape_xml_body(f_data["content"])
-                    out.write(escaped_body)
+                    out.write(escape_xml_body(f_data["content"]))
                     out.write('\n    </file>\n')
-
                 out.write('  </files>\n')
                 out.write('</volume>\n')
 
             contained_files = [entry["rel_path"] for entry in file_data_list]
-
             return {
                 "filename": filename,
                 "title": title,
@@ -467,6 +450,74 @@ class DumpWorker:
         except Exception as e:
             self.log(f"Error writing XML file {filename}: {e}")
             return None
+
+    # -----------------------------
+    # Instructions File
+    # -----------------------------
+
+    def write_instructions_file(
+        self,
+        index_filename: Optional[str],
+        generated_meta: List[dict],
+    ) -> None:
+        self.check_stop()
+
+        out_path = self.output_dir / self.INSTRUCTIONS_FILENAME
+        should_write = True
+
+        if out_path.exists():
+            self.log(f"Instructions file {self.INSTRUCTIONS_FILENAME} already exists.")
+            if not self.ask_overwrite(self.INSTRUCTIONS_FILENAME):
+                should_write = False
+                self.log("Skipping instructions file.")
+            else:
+                self.log("Overwriting instructions file.")
+
+        if not should_write:
+            return
+
+        volumes_list = "\n".join(
+            [f"- {m.get('filename','')}  —  {m.get('title','')}" for m in generated_meta]
+        )
+
+        if index_filename:
+            next_step = f"1) Open `{index_filename}` (master index) and use it to locate the right volume.\n"
+        else:
+            next_step = "1) No master index was generated. Use the volume files directly.\n"
+
+        text = f"""# START HERE — Instructions for AI
+
+You are given a repository codedump split into multiple XML volume files.
+
+## Goal
+Answer questions by opening the minimum necessary files, starting from indexes and entry points.
+
+## How to navigate this dump
+{next_step}2) For a chosen volume, use `<file_index>` first to find candidate paths.
+3) Only then open the matching `<file path="...">` blocks.
+4) Expand cautiously (imports / calls / routes), 1–2 hops unless needed.
+
+## Rules
+- Do NOT try to read the entire dump.
+- Prefer any docs/diagrams/indices if present.
+- Treat binary-like content as non-text.
+- When answering, cite file paths and the volume XML filename.
+
+## Files
+- Instructions (this): `{self.INSTRUCTIONS_FILENAME}`
+- Master index: `{index_filename or "(not generated)"}`
+- Volumes:
+{volumes_list}
+"""
+
+        with out_path.open("w", encoding="utf-8") as f:
+            f.write(text)
+
+        self.log(f"-> Created Instructions File: {self.INSTRUCTIONS_FILENAME}")
+
+    # -----------------------------
+    # Main
+    # -----------------------------
 
     def run(self):
         try:
@@ -530,6 +581,7 @@ class DumpWorker:
             available_slots = self.max_output_files
             planned_dumps = []
             index_filename = "Index.xml"
+            instructions_filename = self.INSTRUCTIONS_FILENAME
 
             if root_files:
                 available_slots -= 1
@@ -591,7 +643,7 @@ class DumpWorker:
                 next_d = planned_dumps[i + 1] if i < len(planned_dumps) - 1 else None
 
                 nav = {
-                    "home_file": index_filename if self.create_index else None,
+                    "home_file": instructions_filename,  # <-- always point to instructions
                     "prev_file": prev_d["filename"] if prev_d else None,
                     "next_file": next_d["filename"] if next_d else None,
                     "prev_title": prev_d["short_title"] if prev_d else "",
@@ -623,6 +675,10 @@ class DumpWorker:
                         f.write(f'  <repo_name>{escape_xml_body(repo_name)}</repo_name>\n')
                         f.write(f'  <root_dir>{escape_xml_body(str(self.root_dir))}</root_dir>\n')
                         f.write(f'  <generated_at>{datetime.now().isoformat()}</generated_at>\n')
+
+                        # NEW
+                        f.write(f'  <instructions_file>{escape_xml_body(instructions_filename)}</instructions_file>\n')
+
                         f.write('  <volumes>\n')
 
                         for meta in generated_meta:
@@ -644,6 +700,12 @@ class DumpWorker:
                         f.write('</index>\n')
 
                     self.log(f"-> Created Master Index: {index_filename}")
+
+            # NEW: Always write instructions file
+            self.write_instructions_file(
+                index_filename=index_filename if self.create_index else None,
+                generated_meta=generated_meta
+            )
 
             # 4. Exclusion Report
             if self.tracked_custom_exclusions:
@@ -667,6 +729,7 @@ class DumpWorker:
             self.log(f"ERROR: {e}")
             import traceback
             traceback.print_exc()
+
 
 # --------------------------------------------------------------------
 # 3. GUI Application
