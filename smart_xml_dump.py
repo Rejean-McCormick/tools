@@ -12,9 +12,10 @@ import queue
 import concurrent.futures
 from xml.sax.saxutils import escape
 import re
+import hashlib
 
 # --------------------------------------------------------------------
-# 1. XML Helpers
+# 1. XML Helpers (AI-optimized: CDATA + raw preservation)
 # --------------------------------------------------------------------
 
 def escape_xml_attr(text):
@@ -24,18 +25,56 @@ def escape_xml_attr(text):
     text = str(text)
     return escape(text, {'"': "&quot;", "'": "&apos;"})
 
-def escape_xml_body(text):
-    """Escapes characters unsafe for XML body content."""
+# Remove illegal XML 1.0 characters:
+# - C0 controls: 0x00-0x08, 0x0B-0x0C, 0x0E-0x1F
+# - C1 controls: 0x7F-0x84, 0x86-0x9F
+_ILLEGAL_XML_1_0_RE = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x84\x86-\x9F]')
+
+def sanitize_xml_text(text: Any) -> str:
+    """Remove characters that are illegal in XML 1.0 (does NOT escape markup)."""
     if text is None:
         return ""
-    text = str(text)
+    s = str(text)
+    return _ILLEGAL_XML_1_0_RE.sub("", s)
 
-    # Remove illegal XML 1.0 characters:
-    # - C0 controls: 0x00-0x08, 0x0B-0x0C, 0x0E-0x1F
-    # - C1 controls: 0x7F-0x84, 0x86-0x9F
-    text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x84\x86-\x9F]', '', text)
+def escape_xml_text(text: Any) -> str:
+    """Sanitize + escape for XML element text nodes (metadata fields)."""
+    return escape(sanitize_xml_text(text))
 
-    return escape(text)
+def cdata_safe(text: Any) -> str:
+    """
+    Sanitize + make safe for CDATA by splitting any occurrence of ']]>'.
+    Preserves original text content while keeping XML well-formed.
+    """
+    s = sanitize_xml_text(text)
+    return s.replace("]]>", "]]]]><![CDATA[>")
+
+def wrap_cdata(text: Any) -> str:
+    """Return a CDATA block with safe content."""
+    return "<![CDATA[" + cdata_safe(text) + "]]>"
+
+def short_sha1(s: str, n: int = 12) -> str:
+    return hashlib.sha1(s.encode("utf-8", errors="replace")).hexdigest()[:n]
+
+def chunk_lines_keepends(text: str, max_lines: int) -> List[Dict[str, Any]]:
+    """
+    Split text into chunks of <= max_lines while preserving exact newlines.
+    Returns list of {start_line, end_line, text}.
+    """
+    if not text:
+        return [{"start_line": 1, "end_line": 0, "text": ""}]
+
+    lines = text.splitlines(True)  # keep line endings
+    out: List[Dict[str, Any]] = []
+    start = 1
+    i = 0
+    while i < len(lines):
+        part = lines[i:i + max_lines]
+        end = start + len(part) - 1
+        out.append({"start_line": start, "end_line": end, "text": "".join(part)})
+        i += max_lines
+        start = end + 1
+    return out
 
 # --------------------------------------------------------------------
 # 2. Core Logic
@@ -94,6 +133,9 @@ class DumpWorker:
 
         # Name chosen to sort first + be explicit
         self.INSTRUCTIONS_FILENAME = "00_START_HERE.instructions.md"
+
+        # Chunking settings (AI-friendly)
+        self.CHUNK_MAX_LINES = 350
 
         self.git_rules = self.load_all_gitignores()
 
@@ -342,12 +384,35 @@ class DumpWorker:
                     line_count = len(content.splitlines())
                     kind = "markdown" if ext == ".md" else "source"
 
+            # Stable-ish ID: content-based when we have real text; fallback otherwise.
+            if kind in ("source", "markdown") and content and size_bytes <= 5_000_000:
+                file_id = short_sha1(rel_path + "\n" + content)
+            else:
+                file_id = short_sha1(f"{rel_path}\n{size_bytes}\n{kind}")
+
+            chunks = None
+            if kind in ("source", "markdown") and content and line_count > self.CHUNK_MAX_LINES:
+                raw_chunks = chunk_lines_keepends(content, self.CHUNK_MAX_LINES)
+                chunks = []
+                for c in raw_chunks:
+                    chunk_id = f"{file_id}:{c['start_line']}-{c['end_line']}"
+                    chunks.append({
+                        "id": chunk_id,
+                        "start_line": int(c["start_line"]),
+                        "end_line": int(c["end_line"]),
+                        "text": c["text"]
+                    })
+                # Avoid duplicating the whole file in memory/output once chunked
+                content = ""
+
             return {
                 "rel_path": rel_path,
                 "ext": ext,
                 "size_bytes": int(size_bytes),
                 "line_count": int(line_count),
                 "kind": kind,
+                "file_id": file_id,
+                "chunks": chunks,
                 "content": content
             }
 
@@ -358,6 +423,8 @@ class DumpWorker:
                 "size_bytes": 0,
                 "line_count": 0,
                 "kind": "error",
+                "file_id": short_sha1(f.name),
+                "chunks": None,
                 "content": f"Error: {e}"
             }
 
@@ -398,29 +465,33 @@ class DumpWorker:
 
                 out.write('  <meta>\n')
                 out.write(f'    <generated_at>{datetime.now().isoformat()}</generated_at>\n')
-                out.write(f'    <title>{escape_xml_body(title)}</title>\n')
-                out.write(f'    <root_dir>{escape_xml_body(str(self.root_dir))}</root_dir>\n')
+                out.write(f'    <title>{escape_xml_text(title)}</title>\n')
+                out.write(f'    <root_dir>{escape_xml_text(str(self.root_dir))}</root_dir>\n')
                 out.write(f'    <file_count>{len(files)}</file_count>\n')
                 out.write(f'    <total_size_mb>{round(size_mb, 4)}</total_size_mb>\n')
 
                 if nav_context.get("home_file"):
-                    out.write(f'    <home>{escape_xml_body(nav_context["home_file"])}</home>\n')
+                    out.write(f'    <home>{escape_xml_text(nav_context["home_file"])}</home>\n')
                 if nav_context.get("next_file"):
-                    out.write(f'    <next_volume>{escape_xml_body(nav_context["next_file"])}</next_volume>\n')
+                    out.write(f'    <next_volume>{escape_xml_text(nav_context["next_file"])}</next_volume>\n')
                 if nav_context.get("prev_file"):
-                    out.write(f'    <prev_volume>{escape_xml_body(nav_context["prev_file"])}</prev_volume>\n')
+                    out.write(f'    <prev_volume>{escape_xml_text(nav_context["prev_file"])}</prev_volume>\n')
 
-                out.write(f'    <prev_title>{escape_xml_body(nav_context.get("prev_title", ""))}</prev_title>\n')
-                out.write(f'    <next_title>{escape_xml_body(nav_context.get("next_title", ""))}</next_title>\n')
-                out.write(f'    <short_title>{escape_xml_body(nav_context.get("short_title", ""))}</short_title>\n')
+                out.write(f'    <prev_title>{escape_xml_text(nav_context.get("prev_title", ""))}</prev_title>\n')
+                out.write(f'    <next_title>{escape_xml_text(nav_context.get("next_title", ""))}</next_title>\n')
+                out.write(f'    <short_title>{escape_xml_text(nav_context.get("short_title", ""))}</short_title>\n')
                 out.write('  </meta>\n')
 
                 out.write('  <file_index>\n')
                 for f_data in file_data_list:
                     p = escape_xml_attr(f_data["rel_path"])
                     k = escape_xml_attr(f_data["kind"])
+                    fid = escape_xml_attr(f_data.get("file_id", ""))
+                    chunks_count = len(f_data["chunks"]) if f_data.get("chunks") else 0
                     out.write(
-                        f'    <entry path="{p}" kind="{k}" size="{f_data["size_bytes"]}" lines="{f_data["line_count"]}" />\n'
+                        f'    <entry id="{fid}" path="{p}" kind="{k}" '
+                        f'size="{f_data["size_bytes"]}" lines="{f_data["line_count"]}" '
+                        f'chunks="{chunks_count}" />\n'
                     )
                 out.write('  </file_index>\n')
 
@@ -428,12 +499,27 @@ class DumpWorker:
                 for f_data in file_data_list:
                     path_attr = escape_xml_attr(f_data["rel_path"])
                     kind_attr = escape_xml_attr(f_data["kind"])
-                    out.write(
-                        f'    <file path="{path_attr}" size="{f_data["size_bytes"]}" '
-                        f'lines="{f_data["line_count"]}" kind="{kind_attr}">\n'
-                    )
-                    out.write(escape_xml_body(f_data["content"]))
-                    out.write('\n    </file>\n')
+                    file_id_attr = escape_xml_attr(f_data.get("file_id", ""))
+
+                    if f_data.get("chunks"):
+                        out.write(
+                            f'    <file id="{file_id_attr}" path="{path_attr}" size="{f_data["size_bytes"]}" '
+                            f'lines="{f_data["line_count"]}" kind="{kind_attr}">\n'
+                        )
+                        for c in f_data["chunks"]:
+                            cid = escape_xml_attr(c["id"])
+                            sline = int(c["start_line"])
+                            eline = int(c["end_line"])
+                            out.write(
+                                f'      <chunk id="{cid}" start="{sline}" end="{eline}">{wrap_cdata(c["text"])}</chunk>\n'
+                            )
+                        out.write('    </file>\n')
+                    else:
+                        out.write(
+                            f'    <file id="{file_id_attr}" path="{path_attr}" size="{f_data["size_bytes"]}" '
+                            f'lines="{f_data["line_count"]}" kind="{kind_attr}">{wrap_cdata(f_data["content"])}</file>\n'
+                        )
+
                 out.write('  </files>\n')
                 out.write('</volume>\n')
 
@@ -493,9 +579,14 @@ You are given a repository codedump split into multiple XML volume files.
 Answer questions by opening the minimum necessary files, starting from indexes and entry points.
 
 ## How to navigate this dump
-{next_step}2) For a chosen volume, use `<file_index>` first to find candidate paths.
+{next_step}2) For a chosen volume, use `<file_index>` first to find candidate paths (and see `chunks="N"`).
 3) Only then open the matching `<file path="...">` blocks.
-4) Expand cautiously (imports / calls / routes), 1–2 hops unless needed.
+4) If `chunks="N"` is > 0, prefer reading only the needed `<chunk start=".." end="..">` blocks.
+5) Expand cautiously (imports / calls / routes), 1–2 hops unless needed.
+
+## Notes on fidelity
+- File contents are stored in CDATA blocks (raw code preserved).
+- XML is kept valid even if code contains `]]>` (it is split safely).
 
 ## Rules
 - Do NOT try to read the entire dump.
@@ -643,7 +734,7 @@ Answer questions by opening the minimum necessary files, starting from indexes a
                 next_d = planned_dumps[i + 1] if i < len(planned_dumps) - 1 else None
 
                 nav = {
-                    "home_file": instructions_filename,  # <-- always point to instructions
+                    "home_file": instructions_filename,  # always point to instructions
                     "prev_file": prev_d["filename"] if prev_d else None,
                     "next_file": next_d["filename"] if next_d else None,
                     "prev_title": prev_d["short_title"] if prev_d else "",
@@ -672,26 +763,24 @@ Answer questions by opening the minimum necessary files, starting from indexes a
                     with index_path.open("w", encoding="utf-8") as f:
                         f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
                         f.write('<index>\n')
-                        f.write(f'  <repo_name>{escape_xml_body(repo_name)}</repo_name>\n')
-                        f.write(f'  <root_dir>{escape_xml_body(str(self.root_dir))}</root_dir>\n')
+                        f.write(f'  <repo_name>{escape_xml_text(repo_name)}</repo_name>\n')
+                        f.write(f'  <root_dir>{escape_xml_text(str(self.root_dir))}</root_dir>\n')
                         f.write(f'  <generated_at>{datetime.now().isoformat()}</generated_at>\n')
-
-                        # NEW
-                        f.write(f'  <instructions_file>{escape_xml_body(instructions_filename)}</instructions_file>\n')
+                        f.write(f'  <instructions_file>{escape_xml_text(instructions_filename)}</instructions_file>\n')
 
                         f.write('  <volumes>\n')
 
                         for meta in generated_meta:
                             f.write('    <volume>\n')
-                            f.write(f'      <filename>{escape_xml_body(meta["filename"])}</filename>\n')
-                            f.write(f'      <title>{escape_xml_body(meta["title"])}</title>\n')
-                            f.write(f'      <short_title>{escape_xml_body(meta.get("short_title", ""))}</short_title>\n')
+                            f.write(f'      <filename>{escape_xml_text(meta["filename"])}</filename>\n')
+                            f.write(f'      <title>{escape_xml_text(meta["title"])}</title>\n')
+                            f.write(f'      <short_title>{escape_xml_text(meta.get("short_title", ""))}</short_title>\n')
                             f.write(f'      <size_mb>{round(meta["size_mb"], 4)}</size_mb>\n')
                             f.write(f'      <file_count>{meta["file_count"]}</file_count>\n')
 
                             f.write('      <contained_files>\n')
                             for cfile in meta["contained_files"]:
-                                f.write(f'        <file>{escape_xml_body(cfile)}</file>\n')
+                                f.write(f'        <file>{escape_xml_text(cfile)}</file>\n')
                             f.write('      </contained_files>\n')
 
                             f.write('    </volume>\n')
@@ -701,7 +790,7 @@ Answer questions by opening the minimum necessary files, starting from indexes a
 
                     self.log(f"-> Created Master Index: {index_filename}")
 
-            # NEW: Always write instructions file
+            # Always write instructions file
             self.write_instructions_file(
                 index_filename=index_filename if self.create_index else None,
                 generated_meta=generated_meta
