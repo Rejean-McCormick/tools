@@ -11,14 +11,15 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Optional
 
+from .constants import DEFAULT_CREATE_GROUPED_BUNDLES, DEFAULT_TXT_MODE
 from .worker import DumpWorker
 
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Smart Wiki Dumper (XML Edition)")
-        self.geometry("600x900")
+        self.title("Smart Wiki Dumper")
+        self.geometry("600x1020")
 
         self.last_output_dir: Optional[str] = None
         self.log_queue: "queue.Queue[str]" = queue.Queue()
@@ -41,7 +42,7 @@ class App(tk.Tk):
         self.entry_out.grid(row=1, column=1, padx=5)
         tk.Button(lbl_frame, text="Browse...", command=self.browse_out).grid(row=1, column=2)
 
-        tk.Label(lbl_frame, text="Max Content Volumes:").grid(row=2, column=0, sticky="w")
+        tk.Label(lbl_frame, text="Max Output Files:").grid(row=2, column=0, sticky="w")
         self.spin_split = tk.Spinbox(lbl_frame, from_=2, to=50, width=5)
         self.spin_split.delete(0, "end")
         self.spin_split.insert(0, 10)
@@ -89,16 +90,84 @@ class App(tk.Tk):
         tk.Checkbutton(opts_frame, text="Ignore .txt files", variable=self.var_ignore_txt).grid(
             row=0, column=0, sticky="w", padx=10
         )
-        self.chk_md = tk.Checkbutton(opts_frame, text="Ignore .md files", variable=self.var_ignore_md)
-        self.chk_md.grid(row=0, column=1, sticky="w", padx=10)
+        tk.Checkbutton(opts_frame, text="Ignore .md files", variable=self.var_ignore_md).grid(
+            row=0, column=1, sticky="w", padx=10
+        )
 
-        tk.Frame(opts_frame, height=1, bg="grey").grid(row=2, column=0, columnspan=2, sticky="we", pady=5)
+        tk.Frame(opts_frame, height=1, bg="grey").grid(row=1, column=0, columnspan=2, sticky="we", pady=6)
+
         tk.Checkbutton(
             opts_frame,
-            text="Create Master Index (Index.xml)",
+            text="Create Master Index (Index.*)",
             variable=self.var_create_index,
             font=("Arial", 9, "bold"),
-        ).grid(row=3, column=0, columnspan=2, sticky="w", padx=10)
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=10)
+
+        # --- Output Format (txt default) ---
+        format_frame = tk.LabelFrame(self, text="Output Format", padx=10, pady=10)
+        format_frame.pack(fill="x", **pad_opts)
+
+        tk.Label(format_frame, text="Format:").grid(row=0, column=0, sticky="w")
+        self.var_output_format = tk.StringVar(value="text (structured .txt) [default]")
+        self.combo_output_format = ttk.Combobox(
+            format_frame,
+            textvariable=self.var_output_format,
+            state="readonly",
+            width=35,
+            values=(
+                "text (structured .txt) [default]",
+                "xml (.xml)",
+            ),
+        )
+        self.combo_output_format.grid(row=0, column=1, sticky="w", padx=5)
+
+        # --- .smartignore options (NEW) ---
+        smart_frame = tk.LabelFrame(self, text=".smartignore", padx=10, pady=10)
+        smart_frame.pack(fill="x", **pad_opts)
+
+        self.var_use_smartignore_exclude = tk.BooleanVar(value=False)
+        self.var_smartignore_index = tk.BooleanVar(value=False)
+
+        tk.Checkbutton(
+            smart_frame,
+            text="Exclude what is listed in .smartignore",
+            variable=self.var_use_smartignore_exclude,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=10)
+
+        tk.Checkbutton(
+            smart_frame,
+            text="Create index of paths matched by .smartignore (SmartignorePathsIndex.txt)",
+            variable=self.var_smartignore_index,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=10, pady=(4, 0))
+
+        # --- ChatGPT helpers ---
+        chatgpt_frame = tk.LabelFrame(self, text="ChatGPT Upload Helpers", padx=10, pady=10)
+        chatgpt_frame.pack(fill="x", **pad_opts)
+
+        tk.Label(chatgpt_frame, text="XML txt_mode:").grid(row=0, column=0, sticky="w")
+        self.var_txt_mode = tk.StringVar(value=DEFAULT_TXT_MODE)
+        self.combo_txt_mode = ttk.Combobox(
+            chatgpt_frame,
+            textvariable=self.var_txt_mode,
+            state="readonly",
+            width=30,
+            values=(
+                "none (only .xml)",
+                "copy (.xml + .xml.txt)",
+                "only (only .xml.txt)",
+            ),
+        )
+        self.combo_txt_mode.grid(row=0, column=1, sticky="w", padx=5)
+
+        self.var_create_bundles = tk.BooleanVar(value=DEFAULT_CREATE_GROUPED_BUNDLES)
+        tk.Checkbutton(
+            chatgpt_frame,
+            text="Create grouped bundles + manifest (recommended when upload limit is tight)",
+            variable=self.var_create_bundles,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=10, pady=(6, 0))
+
+        self.combo_output_format.bind("<<ComboboxSelected>>", lambda _e: self._sync_controls())
+        self._sync_controls()
 
         # --- Actions ---
         actions = tk.Frame(self)
@@ -106,7 +175,7 @@ class App(tk.Tk):
 
         self.btn_run = tk.Button(
             actions,
-            text="GENERATE XML DUMP & INDEX",
+            text="GENERATE DUMP",
             bg="#4CAF50",
             fg="white",
             font=("Arial", 11, "bold"),
@@ -142,7 +211,19 @@ class App(tk.Tk):
 
         self.check_log_queue()
 
-    # Tkinter hook: show any callback exceptions rather than failing silently
+    def _resolve_output_format(self) -> str:
+        raw = (self.var_output_format.get() or "").lower().strip()
+        if raw.startswith("xml"):
+            return "xml"
+        return "text"
+
+    def _sync_controls(self):
+        fmt = self._resolve_output_format()
+        if fmt == "xml":
+            self.combo_txt_mode.config(state="readonly")
+        else:
+            self.combo_txt_mode.config(state="disabled")
+
     def report_callback_exception(self, exc, val, tb):
         import traceback
 
@@ -240,6 +321,14 @@ class App(tk.Tk):
         self.log_thread_safe("\n... Stopping requested ...")
         self.btn_stop.config(state="disabled", text="Stopping...")
 
+    def _resolve_txt_mode(self) -> str:
+        raw = (self.var_txt_mode.get() or "").lower().strip()
+        if raw.startswith("none"):
+            return "none"
+        if raw.startswith("only"):
+            return "only"
+        return "copy"
+
     def start_thread(self):
         repo = self.entry_repo.get()
         out = self.entry_out.get()
@@ -257,6 +346,13 @@ class App(tk.Tk):
             max_files = 10
 
         custom_excludes_paths = [Path(e.get().strip()) for e in self.exclusion_entries if e.get().strip()]
+
+        output_format = self._resolve_output_format()
+        txt_mode = self._resolve_txt_mode()
+        create_bundles = bool(self.var_create_bundles.get())
+
+        use_smartignore_exclude = bool(self.var_use_smartignore_exclude.get())
+        smartignore_index = bool(self.var_smartignore_index.get())
 
         self.last_output_dir = None
         self.btn_open_dest.config(state="disabled")
@@ -276,12 +372,32 @@ class App(tk.Tk):
                 self.var_create_index.get(),
                 custom_excludes_paths,
                 self.var_exclude_mode.get(),
+                output_format,
+                txt_mode,
+                create_bundles,
+                use_smartignore_exclude,
+                smartignore_index,
             ),
             daemon=True,
         )
         t.start()
 
-    def run_process(self, repo, out, max_files, ign_txt, ign_md, create_index, custom_excludes, exclude_mode):
+    def run_process(
+        self,
+        repo: Path,
+        out: Path,
+        max_files: int,
+        ign_txt: bool,
+        ign_md: bool,
+        create_index: bool,
+        custom_excludes: list[Path],
+        exclude_mode: str,
+        output_format: str,
+        txt_mode: str,
+        create_bundles: bool,
+        use_smartignore_exclude: bool,
+        smartignore_index: bool,
+    ):
         worker = DumpWorker(
             repo,
             out,
@@ -294,6 +410,11 @@ class App(tk.Tk):
             self.log_thread_safe,
             self.ask_overwrite_thread_safe,
             self.stop_event,
+            output_format=output_format,
+            txt_mode=txt_mode,
+            create_grouped_bundles=create_bundles,
+            use_smartignore_exclude=use_smartignore_exclude,
+            create_smartignore_paths_index=smartignore_index,
         )
         worker.run()
 
@@ -303,7 +424,7 @@ class App(tk.Tk):
         def _finish():
             self.last_output_dir = out_dir_str
             self.btn_open_dest.config(state="normal")
-            self.btn_run.config(state="normal", text="GENERATE XML DUMP & INDEX")
+            self.btn_run.config(state="normal", text="GENERATE DUMP")
             self.btn_stop.config(state="disabled", text="STOP OPERATION")
 
             if self.stop_event.is_set():
@@ -312,6 +433,6 @@ class App(tk.Tk):
             if err_tb:
                 messagebox.showerror("Error", f"Dump failed with an exception:\n\n{err_tb}")
             else:
-                messagebox.showinfo("Done", f"XML dump generated successfully!\n\nFolder:\n{out_dir_str}")
+                messagebox.showinfo("Done", f"Dump generated successfully!\n\nFolder:\n{out_dir_str}")
 
         self.after(0, _finish)

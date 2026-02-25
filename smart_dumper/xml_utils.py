@@ -2,34 +2,81 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from typing import Any, Dict, List
 from xml.sax.saxutils import escape
 
 
-def escape_xml_attr(text: Any) -> str:
-    """Escapes characters unsafe for XML attributes (includes quotes)."""
-    if text is None:
-        return ""
-    return escape(str(text), {'"': "&quot;", "'": "&apos;"})
-
-
-# Illegal XML 1.0 characters:
-# - C0 controls: 0x00-0x08, 0x0B-0x0C, 0x0E-0x1F
-# - C1 controls: 0x7F-0x84, 0x86-0x9F
-_ILLEGAL_XML_1_0_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x84\x86-\x9F]")
+def _is_xml10_char(cp: int) -> bool:
+    """
+    XML 1.0 (5th ed.) legal characters:
+      - 0x9, 0xA, 0xD
+      - 0x20..0xD7FF
+      - 0xE000..0xFFFD
+      - 0x10000..0x10FFFF
+    Additionally, exclude Unicode noncharacters ending in FFFE/FFFF for extra parser-compat.
+    """
+    if cp in (0x9, 0xA, 0xD):
+        return True
+    if 0x20 <= cp <= 0xD7FF:
+        return True
+    if 0xE000 <= cp <= 0xFFFD:
+        return True
+    if 0x10000 <= cp <= 0x10FFFF:
+        # Exclude plane noncharacters ...FFFE / ...FFFF
+        if (cp & 0xFFFF) in (0xFFFE, 0xFFFF):
+            return False
+        return True
+    return False
 
 
 def sanitize_xml_text(text: Any) -> str:
-    """Remove characters that are illegal in XML 1.0 (does NOT escape markup)."""
+    """
+    Remove characters illegal in XML 1.0 (does NOT escape markup).
+    This makes output robust against:
+      - C0/C1 controls
+      - unpaired surrogates
+      - out-of-range codepoints (defensive)
+      - common Unicode noncharacters (...FFFE/...FFFF)
+    """
     if text is None:
         return ""
-    return _ILLEGAL_XML_1_0_RE.sub("", str(text))
+
+    s = str(text)
+
+    # Fast path: if likely clean ASCII, avoid extra work.
+    # (Most paths/metadata are ASCII; large file contents still go through filtering.)
+    try:
+        s.encode("ascii")
+        # ASCII still contains illegal controls; filter quickly.
+        out_chars = []
+        append = out_chars.append
+        for ch in s:
+            cp = ord(ch)
+            if _is_xml10_char(cp):
+                append(ch)
+        return "".join(out_chars)
+    except Exception:
+        pass
+
+    out_chars = []
+    append = out_chars.append
+    for ch in s:
+        cp = ord(ch)
+        if _is_xml10_char(cp):
+            append(ch)
+    return "".join(out_chars)
 
 
 def escape_xml_text(text: Any) -> str:
     """Sanitize + escape for XML element text nodes (metadata fields)."""
     return escape(sanitize_xml_text(text))
+
+
+def escape_xml_attr(text: Any) -> str:
+    """Sanitize + escape for XML attributes (includes quotes)."""
+    if text is None:
+        return ""
+    return escape(sanitize_xml_text(text), {'"': "&quot;", "'": "&apos;"})
 
 
 def cdata_safe(text: Any) -> str:
