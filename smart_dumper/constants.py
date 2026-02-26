@@ -132,4 +132,4 @@ OVERSIZE_BYTES: int = 5_000_000
 DEFAULT_TXT_MODE: str = "copy"
 
 # Whether to generate grouped upload-helper bundles by default
-DEFAULT_CREATE_GROUPED_BUNDLES: bool = True
+DEFAULT_CREATE_GROUPED_BUNDLES: bool = False
