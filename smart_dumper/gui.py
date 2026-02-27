@@ -11,14 +11,19 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Optional
 
-from .constants import DEFAULT_CREATE_GROUPED_BUNDLES, DEFAULT_TXT_MODE
+try:
+    from .constants import DEFAULT_CREATE_SINGLE_UPLOAD_DOC as _DEFAULT_CREATE_UPLOAD_DOC
+except Exception:
+    _DEFAULT_CREATE_UPLOAD_DOC = False
+
+from .constants import DEFAULT_TXT_MODE
 from .worker import DumpWorker
 
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Smart Wiki Dumper")
+        self.title("Smart Dumper")
         self.geometry("600x1020")
 
         self.last_output_dir: Optional[str] = None
@@ -121,7 +126,7 @@ class App(tk.Tk):
         )
         self.combo_output_format.grid(row=0, column=1, sticky="w", padx=5)
 
-        # --- .smartignore options (NEW) ---
+        # --- .smartignore options ---
         smart_frame = tk.LabelFrame(self, text=".smartignore", padx=10, pady=10)
         smart_frame.pack(fill="x", **pad_opts)
 
@@ -159,11 +164,12 @@ class App(tk.Tk):
         )
         self.combo_txt_mode.grid(row=0, column=1, sticky="w", padx=5)
 
-        self.var_create_bundles = tk.BooleanVar(value=DEFAULT_CREATE_GROUPED_BUNDLES)
+        # Single upload doc: Doc<parent-folder-name><ext>
+        self.var_create_chatgpt_doc = tk.BooleanVar(value=_DEFAULT_CREATE_UPLOAD_DOC)
         tk.Checkbutton(
             chatgpt_frame,
-            text="Create grouped bundles + manifest (recommended when upload limit is tight)",
-            variable=self.var_create_bundles,
+            text='Create single upload document: "Doc<parent-folder-name>" (recommended)',
+            variable=self.var_create_chatgpt_doc,
         ).grid(row=1, column=0, columnspan=2, sticky="w", padx=10, pady=(6, 0))
 
         self.combo_output_format.bind("<<ComboboxSelected>>", lambda _e: self._sync_controls())
@@ -225,8 +231,6 @@ class App(tk.Tk):
             self.combo_txt_mode.config(state="disabled")
 
     def report_callback_exception(self, exc, val, tb):
-        import traceback
-
         tb_text = "".join(traceback.format_exception(exc, val, tb))
         try:
             messagebox.showerror("Unhandled UI exception", tb_text)
@@ -349,7 +353,8 @@ class App(tk.Tk):
 
         output_format = self._resolve_output_format()
         txt_mode = self._resolve_txt_mode()
-        create_bundles = bool(self.var_create_bundles.get())
+
+        create_chatgpt_doc = bool(self.var_create_chatgpt_doc.get())
 
         use_smartignore_exclude = bool(self.var_use_smartignore_exclude.get())
         smartignore_index = bool(self.var_smartignore_index.get())
@@ -374,7 +379,7 @@ class App(tk.Tk):
                 self.var_exclude_mode.get(),
                 output_format,
                 txt_mode,
-                create_bundles,
+                create_chatgpt_doc,
                 use_smartignore_exclude,
                 smartignore_index,
             ),
@@ -394,7 +399,7 @@ class App(tk.Tk):
         exclude_mode: str,
         output_format: str,
         txt_mode: str,
-        create_bundles: bool,
+        create_chatgpt_doc: bool,
         use_smartignore_exclude: bool,
         smartignore_index: bool,
     ):
@@ -412,7 +417,7 @@ class App(tk.Tk):
             self.stop_event,
             output_format=output_format,
             txt_mode=txt_mode,
-            create_grouped_bundles=create_bundles,
+            create_single_upload_doc=create_chatgpt_doc,
             use_smartignore_exclude=use_smartignore_exclude,
             create_smartignore_paths_index=smartignore_index,
         )

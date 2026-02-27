@@ -92,19 +92,54 @@ ALWAYS_IGNORE_FILES: set[str] = {
 # Name chosen to sort first + be explicit
 INSTRUCTIONS_FILENAME: str = "00_START_HERE.instructions.md"
 
-# Master index base name (worker may normalize to Index.xml.txt in txt-only modes)
-INDEX_FILENAME: str = "Index.xml"
+# Master index base name (DumpWorker decides actual filename based on output_format/txt_mode)
+INDEX_FILENAME_TEXT: str = "Index.txt"
+INDEX_FILENAME_XML: str = "Index.xml"
+INDEX_FILENAME: str = INDEX_FILENAME_TEXT
 
-# Grouped bundle artifacts (upload helpers for file-count limits)
+# -----------------------------
+# ChatGPT Upload Helper (single doc)
+# -----------------------------
+# Goal: 1 file that regroups everything, named: "Doc" + <parent folder name>
+#
+# Notes:
+# - "parent folder name" should be computed by the worker from the selected repo root:
+#     parent_name = root_dir.parent.name
+# - Filename should be built as:
+#     f"{UPLOAD_HELPER_DOC_PREFIX}{UPLOAD_HELPER_DOC_JOINER}{parent_name}{ext}"
+#   where ext depends on output mode (text vs xml+txt).
+
+UPLOAD_HELPER_DOC_PREFIX: str = "Doc"
+# Empty string => exact "Doc"+"ParentName" concatenation
+UPLOAD_HELPER_DOC_JOINER: str = ""
+# Base template without extension
+UPLOAD_HELPER_DOC_BASENAME_TEMPLATE: str = "{prefix}{joiner}{parent_name}"
+
+# Default UI/worker option: create the single upload-helper doc
+DEFAULT_CREATE_SINGLE_UPLOAD_DOC: bool = False
+
+# -----------------------------
+# Legacy: Grouped bundle artifacts (deprecated)
+# -----------------------------
+# Kept for backward compatibility while the codebase transitions to the single-doc helper.
+
 GROUPED_MANIFEST_FILENAME: str = "REPO_MANIFEST_GROUPED.md"
+
 BUNDLE_GROUPS: tuple[str, ...] = ("CORE", "DOCS_TOOLS", "TESTS_OTHERS")
-BUNDLE_FILENAMES: dict[str, str] = {
-    "CORE": "REPO_CORE.xml.txt",
-    "DOCS_TOOLS": "REPO_DOCS_TOOLS.xml.txt",
-    "TESTS_OTHERS": "REPO_TESTS_OTHERS.xml.txt",
+
+BUNDLE_BASENAMES: dict[str, str] = {
+    "CORE": "REPO_CORE",
+    "DOCS_TOOLS": "REPO_DOCS_TOOLS",
+    "TESTS_OTHERS": "REPO_TESTS_OTHERS",
 }
 
-# Heuristic keywords for classifying volumes into bundles
+# Convenient per-mode filenames (some legacy code assumed .xml.txt)
+BUNDLE_FILENAMES_TEXT: dict[str, str] = {k: f"{v}.txt" for k, v in BUNDLE_BASENAMES.items()}
+BUNDLE_FILENAMES_XMLTXT: dict[str, str] = {k: f"{v}.xml.txt" for k, v in BUNDLE_BASENAMES.items()}
+
+# Backward-compat alias (historically .xml.txt)
+BUNDLE_FILENAMES: dict[str, str] = dict(BUNDLE_FILENAMES_XMLTXT)
+
 BUNDLE_KEYWORDS: dict[str, tuple[str, ...]] = {
     "CORE": ("app", "frontend", "ui", "client", "schema", "schemas", "core"),
     "DOCS_TOOLS": ("doc", "docs", "readme", "guide", "manual", "tool", "tools", "script", "scripts"),
@@ -131,5 +166,5 @@ OVERSIZE_BYTES: int = 5_000_000
 #   - "only": write only .xml.txt (best for file-count limits)
 DEFAULT_TXT_MODE: str = "copy"
 
-# Whether to generate grouped upload-helper bundles by default
-DEFAULT_CREATE_GROUPED_BUNDLES: bool = False
+# Backward-compat alias (to be removed once GUI/worker stop using grouped bundles)
+DEFAULT_CREATE_GROUPED_BUNDLES: bool = DEFAULT_CREATE_SINGLE_UPLOAD_DOC
