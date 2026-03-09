@@ -6,6 +6,11 @@ from __future__ import annotations
 # -----------------------------
 
 # Folders always excluded from scanning
+#
+# NOTE:
+# Do NOT exclude generic folders like "lib" or "bin" here, because many repos—
+# including Grammatical Framework (GF) projects—store source/framework grammars
+# under those names.
 ALWAYS_IGNORE_DIRS: set[str] = {
     ".git",
     ".svn",
@@ -28,8 +33,8 @@ ALWAYS_IGNORE_DIRS: set[str] = {
     "abstract_wiki_architect.egg-info",
     "WEB-INF",
     "classes",
-    "lib",
-    "bin",
+    # "lib",   # removed: needed for GF framework/source in many repos
+    # "bin",   # removed: some GF repos also use this for grammars/artifacts
     "obj",
 }
 
