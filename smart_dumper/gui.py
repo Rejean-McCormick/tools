@@ -167,7 +167,7 @@ class App(tk.Tk):
         ).grid(row=1, column=0, columnspan=2, sticky="w", padx=10, pady=(4, 0))
 
         # --- ChatGPT helpers ---
-        chatgpt_frame = tk.LabelFrame(self, text="ChatGPT Upload Helpers", padx=10, pady=10)
+        chatgpt_frame = tk.LabelFrame(self, text="Get a single file having all the files generated above", padx=10, pady=10)
         chatgpt_frame.pack(fill="x", **pad_opts)
 
         tk.Label(chatgpt_frame, text="XML txt_mode:").grid(row=0, column=0, sticky="w")
@@ -189,7 +189,7 @@ class App(tk.Tk):
         self.var_create_chatgpt_doc = tk.BooleanVar(value=_DEFAULT_CREATE_UPLOAD_DOC)
         tk.Checkbutton(
             chatgpt_frame,
-            text=f'Create single upload document: "{CHATGPT_UPLOAD_DOC_PREFIX}<parent-folder-name>" (recommended)',
+            text=f'Create single upload document: "{CHATGPT_UPLOAD_DOC_PREFIX}<parent-folder-name>",
             variable=self.var_create_chatgpt_doc,
         ).grid(row=1, column=0, columnspan=2, sticky="w", padx=10, pady=(6, 0))
 
