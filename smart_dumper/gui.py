@@ -6,6 +6,7 @@ import queue
 import subprocess
 import sys
 import threading
+import traceback
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
@@ -13,11 +14,15 @@ from typing import Optional
 
 try:
     from .constants import DEFAULT_CREATE_SINGLE_UPLOAD_DOC as _DEFAULT_CREATE_UPLOAD_DOC
+    from .constants import DEFAULT_TXT_MODE
 except Exception:
     _DEFAULT_CREATE_UPLOAD_DOC = False
+    DEFAULT_TXT_MODE = "copy"
 
-from .constants import DEFAULT_TXT_MODE
 from .worker import DumpWorker
+
+
+CHATGPT_UPLOAD_DOC_PREFIX = "Code_snapshot_"
 
 
 class App(tk.Tk):
@@ -59,7 +64,11 @@ class App(tk.Tk):
 
         tk.Label(self.frame_excludes, text="Quantity to exclude:").grid(row=0, column=0, sticky="w")
         self.spin_exclude_qty = tk.Spinbox(
-            self.frame_excludes, from_=0, to=5, width=5, command=self.update_exclusion_widgets
+            self.frame_excludes,
+            from_=0,
+            to=5,
+            width=5,
+            command=self.update_exclusion_widgets,
         )
         self.spin_exclude_qty.delete(0, "end")
         self.spin_exclude_qty.insert(0, 0)
@@ -93,13 +102,25 @@ class App(tk.Tk):
         self.var_create_index = tk.BooleanVar(value=True)
 
         tk.Checkbutton(opts_frame, text="Ignore .txt files", variable=self.var_ignore_txt).grid(
-            row=0, column=0, sticky="w", padx=10
+            row=0,
+            column=0,
+            sticky="w",
+            padx=10,
         )
         tk.Checkbutton(opts_frame, text="Ignore .md files", variable=self.var_ignore_md).grid(
-            row=0, column=1, sticky="w", padx=10
+            row=0,
+            column=1,
+            sticky="w",
+            padx=10,
         )
 
-        tk.Frame(opts_frame, height=1, bg="grey").grid(row=1, column=0, columnspan=2, sticky="we", pady=6)
+        tk.Frame(opts_frame, height=1, bg="grey").grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            sticky="we",
+            pady=6,
+        )
 
         tk.Checkbutton(
             opts_frame,
@@ -130,7 +151,7 @@ class App(tk.Tk):
         smart_frame = tk.LabelFrame(self, text=".smartignore", padx=10, pady=10)
         smart_frame.pack(fill="x", **pad_opts)
 
-        self.var_use_smartignore_exclude = tk.BooleanVar(value=False)
+        self.var_use_smartignore_exclude = tk.BooleanVar(value=True)
         self.var_smartignore_index = tk.BooleanVar(value=False)
 
         tk.Checkbutton(
@@ -164,11 +185,11 @@ class App(tk.Tk):
         )
         self.combo_txt_mode.grid(row=0, column=1, sticky="w", padx=5)
 
-        # Single upload doc: Doc<parent-folder-name><ext>
+        # Single upload doc: Code_snapshot_<parent-folder-name><ext>
         self.var_create_chatgpt_doc = tk.BooleanVar(value=_DEFAULT_CREATE_UPLOAD_DOC)
         tk.Checkbutton(
             chatgpt_frame,
-            text='Create single upload document: "Doc<parent-folder-name>" (recommended)',
+            text=f'Create single upload document: "{CHATGPT_UPLOAD_DOC_PREFIX}<parent-folder-name>" (recommended)',
             variable=self.var_create_chatgpt_doc,
         ).grid(row=1, column=0, columnspan=2, sticky="w", padx=10, pady=(6, 0))
 
@@ -276,7 +297,7 @@ class App(tk.Tk):
         for i in range(count):
             row = tk.Frame(self.frame_dynamic_excludes)
             row.pack(fill="x", pady=2)
-            tk.Label(row, text=f"Path {i+1}:").pack(side="left")
+            tk.Label(row, text=f"Path {i + 1}:").pack(side="left")
             e = tk.Entry(row)
             e.pack(side="left", fill="x", expand=True, padx=5)
             self.exclusion_entries.append(e)
@@ -418,6 +439,7 @@ class App(tk.Tk):
             output_format=output_format,
             txt_mode=txt_mode,
             create_single_upload_doc=create_chatgpt_doc,
+            upload_doc_prefix=CHATGPT_UPLOAD_DOC_PREFIX,
             use_smartignore_exclude=use_smartignore_exclude,
             create_smartignore_paths_index=smartignore_index,
         )

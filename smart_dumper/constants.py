@@ -105,7 +105,7 @@ INDEX_FILENAME: str = INDEX_FILENAME_TEXT
 # -----------------------------
 # ChatGPT Upload Helper (single doc)
 # -----------------------------
-# Goal: 1 file that regroups everything, named: "Doc" + <parent folder name>
+# Goal: 1 file that regroups everything, named: "Code_snapshot_" + <parent folder name>
 #
 # Notes:
 # - "parent folder name" should be computed by the worker from the selected repo root:
@@ -114,8 +114,8 @@ INDEX_FILENAME: str = INDEX_FILENAME_TEXT
 #     f"{UPLOAD_HELPER_DOC_PREFIX}{UPLOAD_HELPER_DOC_JOINER}{parent_name}{ext}"
 #   where ext depends on output mode (text vs xml+txt).
 
-UPLOAD_HELPER_DOC_PREFIX: str = "Doc"
-# Empty string => exact "Doc"+"ParentName" concatenation
+UPLOAD_HELPER_DOC_PREFIX: str = "Code_snapshot_"
+# Empty string => exact "Code_snapshot_" + "ParentName" concatenation
 UPLOAD_HELPER_DOC_JOINER: str = ""
 # Base template without extension
 UPLOAD_HELPER_DOC_BASENAME_TEMPLATE: str = "{prefix}{joiner}{parent_name}"

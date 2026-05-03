@@ -12,6 +12,7 @@ from ..constants import (
     CHUNK_MAX_LINES,
     INSTRUCTIONS_FILENAME,
     OVERSIZE_BYTES,
+    UPLOAD_HELPER_DOC_PREFIX,
 )
 from ..gitignore_engine import GitIgnoreEngine
 
@@ -44,7 +45,7 @@ class DumpWorker(FileCollectionMixin, WritersTextMixin, IndexWriterMixin):
       - "only": .xml.txt only (no .xml)
 
     Upload helper:
-      - create_single_upload_doc=True => one combined file: "Doc<parent_folder><ext>"
+      - create_single_upload_doc=True => one combined file: "Code_snapshot_<parent_folder><ext>"
       - create_grouped_bundles=True  => legacy grouped bundles + manifest
     """
 
@@ -68,7 +69,7 @@ class DumpWorker(FileCollectionMixin, WritersTextMixin, IndexWriterMixin):
         create_grouped_bundles: bool = False,
         # Preferred option (single combined upload helper doc)
         create_single_upload_doc: Optional[bool] = None,
-        upload_doc_prefix: str = "Doc",
+        upload_doc_prefix: str = UPLOAD_HELPER_DOC_PREFIX,
         # .smartignore options
         use_smartignore_exclude: bool = False,
         create_smartignore_paths_index: bool = False,
@@ -116,7 +117,10 @@ class DumpWorker(FileCollectionMixin, WritersTextMixin, IndexWriterMixin):
             self.create_single_upload_doc = bool(create_single_upload_doc)
             self.create_grouped_bundles = bool(create_grouped_bundles)
 
-        self.upload_doc_prefix = (upload_doc_prefix or "Doc").strip() or "Doc"
+        self.upload_doc_prefix = (
+            (upload_doc_prefix or UPLOAD_HELPER_DOC_PREFIX).strip()
+            or UPLOAD_HELPER_DOC_PREFIX
+        )
 
         # .smartignore
         self.use_smartignore_exclude = bool(use_smartignore_exclude)
