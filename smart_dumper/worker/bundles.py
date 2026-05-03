@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+from ..constants import UPLOAD_HELPER_DOC_PREFIX
+
 
 @dataclass(frozen=True)
 class BundleWriter:
@@ -22,8 +24,8 @@ class BundleWriter:
 
     # New (preferred) mode
     create_single_upload_doc: bool = False
-    repo_root: Optional[Path] = None  # used to compute parent folder name for "Doc<parent>"
-    upload_doc_prefix: str = "Doc"
+    repo_root: Optional[Path] = None  # used to compute parent folder name for "Code_snapshot_<parent>"
+    upload_doc_prefix: str = UPLOAD_HELPER_DOC_PREFIX
 
     def bundle_extension(self) -> str:
         if (self.output_format or "").strip().lower() == "xml":
@@ -51,7 +53,10 @@ class BundleWriter:
             except Exception:
                 parent_name = getattr(self.repo_root.parent, "name", "Repo") or "Repo"
 
-        prefix = (self.upload_doc_prefix or "Doc").strip() or "Doc"
+        prefix = (
+            (self.upload_doc_prefix or UPLOAD_HELPER_DOC_PREFIX).strip()
+            or UPLOAD_HELPER_DOC_PREFIX
+        )
         parent_name = self._sanitize_filename_component(parent_name)
         return f"{prefix}{parent_name}{self.bundle_extension()}"
 
@@ -72,7 +77,7 @@ class BundleWriter:
 
     def write_upload_helper_artifacts(self, generated_meta: List[dict]) -> Dict[str, str]:
         """
-        Preferred entrypoint: returns either {"single": "<DocParent.txt>"} OR legacy grouped artifacts.
+        Preferred entrypoint: returns either {"single": "<Code_snapshot_Parent.txt>"} OR legacy grouped artifacts.
         """
         if self.create_single_upload_doc:
             out_name = self.write_single_upload_doc(generated_meta)
@@ -177,7 +182,9 @@ class BundleWriter:
         """
         Writes ONE combined upload-helper file that concatenates all volume files.
 
-        Naming default: "Doc<parent_folder_name><ext>" where <parent_folder_name> comes from repo_root.parent.name.
+        Naming default: "Code_snapshot_<parent_folder_name><ext>"
+        where <parent_folder_name> comes from repo_root.parent.name.
+
         Returns the filename on success, else None.
         """
         if not generated_meta:
@@ -205,13 +212,16 @@ class BundleWriter:
                     self.check_stop()
                     if not m.get("filename"):
                         continue
+
                     vol_file = self.output_dir / m["filename"]
                     out.write("\n\n")
                     out.write(f"===== BEGIN VOLUME {m['filename']} :: {m.get('title','')} =====\n")
+
                     with vol_file.open("r", encoding="utf-8", errors="replace") as vf:
                         for line in vf:
                             self.check_stop()
                             out.write(line)
+
                     out.write(f"\n===== END VOLUME {m['filename']} =====\n")
 
             self.log(f"    -> Created single upload doc: {final_name}")
