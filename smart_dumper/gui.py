@@ -129,7 +129,7 @@ class App(tk.Tk):
             font=("Arial", 9, "bold"),
         ).grid(row=2, column=0, columnspan=2, sticky="w", padx=10)
 
-        # --- Output Format (txt default) ---
+        # --- Output Format ---
         format_frame = tk.LabelFrame(self, text="Output Format", padx=10, pady=10)
         format_frame.pack(fill="x", **pad_opts)
 
@@ -166,8 +166,8 @@ class App(tk.Tk):
             variable=self.var_smartignore_index,
         ).grid(row=1, column=0, columnspan=2, sticky="w", padx=10, pady=(4, 0))
 
-        # --- ChatGPT helpers ---
-        chatgpt_frame = tk.LabelFrame(self, text="Get a single file having all the files generated above", padx=10, pady=10)
+        # --- Single combined upload file ---
+        chatgpt_frame = tk.LabelFrame(self, text="Single Combined Upload File", padx=10, pady=10)
         chatgpt_frame.pack(fill="x", **pad_opts)
 
         tk.Label(chatgpt_frame, text="XML txt_mode:").grid(row=0, column=0, sticky="w")
@@ -185,11 +185,11 @@ class App(tk.Tk):
         )
         self.combo_txt_mode.grid(row=0, column=1, sticky="w", padx=5)
 
-        # Single upload doc: Code_snapshot_<parent-folder-name><ext>
+        # Single upload doc: Code_snapshot_<repo-folder-name><ext>
         self.var_create_chatgpt_doc = tk.BooleanVar(value=_DEFAULT_CREATE_UPLOAD_DOC)
         tk.Checkbutton(
             chatgpt_frame,
-            text=f'Create single upload document: "{CHATGPT_UPLOAD_DOC_PREFIX}<parent-folder-name>",
+            text=f'Create single upload document: "{CHATGPT_UPLOAD_DOC_PREFIX}<repo-folder-name>"',
             variable=self.var_create_chatgpt_doc,
         ).grid(row=1, column=0, columnspan=2, sticky="w", padx=10, pady=(6, 0))
 

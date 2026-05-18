@@ -24,7 +24,7 @@ class BundleWriter:
 
     # New (preferred) mode
     create_single_upload_doc: bool = False
-    repo_root: Optional[Path] = None  # used to compute parent folder name for "Code_snapshot_<parent>"
+    repo_root: Optional[Path] = None  # used to compute repo folder name for "Code_snapshot_<repo>"
     upload_doc_prefix: str = UPLOAD_HELPER_DOC_PREFIX
 
     def bundle_extension(self) -> str:
@@ -46,19 +46,19 @@ class BundleWriter:
         return cleaned or "Repo"
 
     def default_single_doc_name(self) -> str:
-        parent_name = "Repo"
+        repo_name = "Repo"
         if self.repo_root is not None:
             try:
-                parent_name = self.repo_root.resolve().parent.name or "Repo"
+                repo_name = self.repo_root.resolve().name or "Repo"
             except Exception:
-                parent_name = getattr(self.repo_root.parent, "name", "Repo") or "Repo"
+                repo_name = getattr(self.repo_root, "name", "Repo") or "Repo"
 
         prefix = (
             (self.upload_doc_prefix or UPLOAD_HELPER_DOC_PREFIX).strip()
             or UPLOAD_HELPER_DOC_PREFIX
         )
-        parent_name = self._sanitize_filename_component(parent_name)
-        return f"{prefix}{parent_name}{self.bundle_extension()}"
+        repo_name = self._sanitize_filename_component(repo_name)
+        return f"{prefix}{repo_name}{self.bundle_extension()}"
 
     def classify_volume_group(self, meta: dict) -> str:
         s = " ".join(
@@ -77,7 +77,7 @@ class BundleWriter:
 
     def write_upload_helper_artifacts(self, generated_meta: List[dict]) -> Dict[str, str]:
         """
-        Preferred entrypoint: returns either {"single": "<Code_snapshot_Parent.txt>"} OR legacy grouped artifacts.
+        Preferred entrypoint: returns either {"single": "<Code_snapshot_Repo.txt>"} OR legacy grouped artifacts.
         """
         if self.create_single_upload_doc:
             out_name = self.write_single_upload_doc(generated_meta)
@@ -182,8 +182,8 @@ class BundleWriter:
         """
         Writes ONE combined upload-helper file that concatenates all volume files.
 
-        Naming default: "Code_snapshot_<parent_folder_name><ext>"
-        where <parent_folder_name> comes from repo_root.parent.name.
+        Naming default: "Code_snapshot_<repo_folder_name><ext>"
+        where <repo_folder_name> comes from repo_root.name.
 
         Returns the filename on success, else None.
         """

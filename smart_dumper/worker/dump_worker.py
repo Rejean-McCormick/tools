@@ -45,7 +45,7 @@ class DumpWorker(FileCollectionMixin, WritersTextMixin, IndexWriterMixin):
       - "only": .xml.txt only (no .xml)
 
     Upload helper:
-      - create_single_upload_doc=True => one combined file: "Code_snapshot_<parent_folder><ext>"
+      - create_single_upload_doc=True => one combined file: "Code_snapshot_<repo_folder><ext>"
       - create_grouped_bundles=True  => legacy grouped bundles + manifest
     """
 

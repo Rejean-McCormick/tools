@@ -32,7 +32,6 @@ ALWAYS_IGNORE_DIRS: set[str] = {
     "out",
     "abstract_wiki_architect.egg-info",
     "WEB-INF",
-    "classes",
     # "lib",   # removed: needed for GF framework/source in many repos
     # "bin",   # removed: some GF repos also use this for grammars/artifacts
     "obj",
@@ -105,19 +104,21 @@ INDEX_FILENAME: str = INDEX_FILENAME_TEXT
 # -----------------------------
 # ChatGPT Upload Helper (single doc)
 # -----------------------------
-# Goal: 1 file that regroups everything, named: "Code_snapshot_" + <parent folder name>
+# Goal: 1 file that regroups everything, named: "Code_snapshot_" + <repo folder name>
 #
 # Notes:
-# - "parent folder name" should be computed by the worker from the selected repo root:
-#     parent_name = root_dir.parent.name
+# - "repo folder name" should be computed by the worker from the selected repo root:
+#     repo_name = root_dir.name
 # - Filename should be built as:
-#     f"{UPLOAD_HELPER_DOC_PREFIX}{UPLOAD_HELPER_DOC_JOINER}{parent_name}{ext}"
+#     f"{UPLOAD_HELPER_DOC_PREFIX}{UPLOAD_HELPER_DOC_JOINER}{repo_name}{ext}"
 #   where ext depends on output mode (text vs xml+txt).
 
 UPLOAD_HELPER_DOC_PREFIX: str = "Code_snapshot_"
-# Empty string => exact "Code_snapshot_" + "ParentName" concatenation
+# Empty string => exact "Code_snapshot_" + "RepoName" concatenation
 UPLOAD_HELPER_DOC_JOINER: str = ""
 # Base template without extension
+# NOTE: The {parent_name} placeholder is kept for backward compatibility.
+# New code should treat its value as the selected repo folder name.
 UPLOAD_HELPER_DOC_BASENAME_TEMPLATE: str = "{prefix}{joiner}{parent_name}"
 
 # Default UI/worker option: create the single upload-helper doc
