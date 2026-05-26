@@ -6,6 +6,14 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from ..xml_utils import chunk_lines_keepends, short_sha1
+from .ai_navigation import (
+    build_chunk_refs,
+    build_line_ref,
+    extract_python_imports,
+    extract_python_symbols,
+    number_lines,
+    summarize_file,
+)
 
 
 @dataclass(frozen=True)
@@ -15,6 +23,9 @@ class FileProcessor:
 
     Extracted from DumpWorker._process_file_content(), with improved stop-handling and
     safer rel_path computation.
+
+    AI navigation metadata is intentionally created here so writers and indexes can consume
+    one shared file_data shape without recomputing or drifting.
     """
 
     root_dir: Path
@@ -25,6 +36,13 @@ class FileProcessor:
     exclusion_mode_getter: Callable[[], str]
     get_file_size: Callable[[Path], int]
     check_stop: Optional[Callable[[], None]] = None  # optional: raise InterruptedError
+
+    ai_navigation: bool = True
+    number_source_lines: bool = False
+    create_symbol_index: bool = True
+    create_import_index: bool = True
+    create_file_summaries: bool = True
+    line_number_width: int = 6
 
     def _stop_now(self) -> bool:
         return bool(getattr(self.stop_event, "is_set", lambda: False)())
@@ -40,14 +58,15 @@ class FileProcessor:
         """
         Returns:
             dict with keys:
-              rel_path, ext, size_bytes, line_count, kind, file_id, chunks, content
+              rel_path, ext, size_bytes, line_count, kind, file_id, chunks, content,
+              line_ref, chunk_refs, symbols, imports, summary, numbered_content
             or None if stop_event is already set before starting.
         """
         if self._stop_now():
             return None
 
         try:
-            # Stop-check early (for consistent behavior with DumpWorker.check_stop)
+            # Stop-check early for consistent behavior with DumpWorker.check_stop.
             self._check_stop()
 
             try:
@@ -66,12 +85,12 @@ class FileProcessor:
 
             if is_excluded_path:
                 if "Names" in exclusion_mode:
-                    # "list_name_only": content omitted, only path is meaningful
+                    # "list_name_only": content omitted, only path is meaningful.
                     content = ""
                     kind = "list_name_only"
                     size_bytes = 0
                 else:
-                    # "metadata_only": size captured, content omitted
+                    # "metadata_only": size captured, content omitted.
                     size_bytes = int(self.get_file_size(f))
                     content = ""
                     kind = "metadata_only"
@@ -87,30 +106,75 @@ class FileProcessor:
                     line_count = len(content.splitlines())
                     kind = "markdown" if ext == ".md" else "source"
 
-            # Stable ID (content-hash when we actually include content, otherwise metadata-hash)
-            if kind in ("source", "markdown") and content and size_bytes <= int(self.oversize_bytes):
-                file_id = short_sha1(rel_path + "\n" + content)
+            # Preserve the full clean source before chunking clears content.
+            clean_content = content
+
+            # Stable ID: content-hash when content is included, otherwise metadata-hash.
+            if kind in ("source", "markdown") and clean_content and size_bytes <= int(self.oversize_bytes):
+                file_id = short_sha1(rel_path + "\n" + clean_content)
             else:
                 file_id = short_sha1(f"{rel_path}\n{size_bytes}\n{kind}")
 
-            # Chunk big files
-            chunks = None
-            if kind in ("source", "markdown") and content and line_count > int(self.chunk_max_lines):
+            # AI navigation metadata.
+            line_ref = ""
+            chunk_refs: list[str] = []
+            symbols: list[dict] = []
+            imports: list[dict] = []
+            summary = ""
+            numbered_content = ""
+
+            if self.ai_navigation and kind in ("source", "markdown") and clean_content:
+                line_ref = build_line_ref(line_count)
+
+                if ext == ".py":
+                    if self.create_symbol_index:
+                        self._check_stop()
+                        symbols = extract_python_symbols(clean_content)
+
+                    if self.create_import_index:
+                        self._check_stop()
+                        imports = extract_python_imports(clean_content)
+
+                if self.create_file_summaries:
+                    self._check_stop()
+                    summary = summarize_file(
+                        rel_path=rel_path,
+                        kind=kind,
+                        symbols=symbols,
+                        imports=imports,
+                    )
+
+            if self.number_source_lines and kind in ("source", "markdown") and clean_content:
                 self._check_stop()
-                raw_chunks = chunk_lines_keepends(content, int(self.chunk_max_lines))
+                numbered_content = number_lines(clean_content, width=int(self.line_number_width))
+
+            # Chunk big files.
+            chunks = None
+            if kind in ("source", "markdown") and clean_content and line_count > int(self.chunk_max_lines):
+                self._check_stop()
+                raw_chunks = chunk_lines_keepends(clean_content, int(self.chunk_max_lines))
                 chunks = []
+
                 for c in raw_chunks:
                     self._check_stop()
-                    chunk_id = f"{file_id}:{c['start_line']}-{c['end_line']}"
+                    start_line = int(c["start_line"])
+                    end_line = int(c["end_line"])
+                    chunk_id = f"{file_id}:{start_line}-{end_line}"
+
                     chunks.append(
                         {
                             "id": chunk_id,
-                            "start_line": int(c["start_line"]),
-                            "end_line": int(c["end_line"]),
+                            "start_line": start_line,
+                            "end_line": end_line,
                             "text": c["text"],
                         }
                     )
-                content = ""  # content is now carried by chunks
+
+                chunk_refs = build_chunk_refs(chunks, line_count)
+                content = ""  # Content is now carried by chunks.
+            else:
+                content = clean_content
+                chunk_refs = build_chunk_refs(chunks, line_count)
 
             return {
                 "rel_path": rel_path,
@@ -121,12 +185,18 @@ class FileProcessor:
                 "file_id": file_id,
                 "chunks": chunks,
                 "content": content,
+                "line_ref": line_ref,
+                "chunk_refs": chunk_refs,
+                "symbols": symbols,
+                "imports": imports,
+                "summary": summary,
+                "numbered_content": numbered_content,
             }
 
         except InterruptedError:
             return None
         except Exception as e:
-            # Keep worker resilient: return an error pseudo-entry
+            # Keep worker resilient: return an error pseudo-entry.
             safe_name = getattr(f, "name", "unknown")
             return {
                 "rel_path": safe_name,
@@ -137,4 +207,10 @@ class FileProcessor:
                 "file_id": short_sha1(safe_name),
                 "chunks": None,
                 "content": f"{type(e).__name__}: {e}",
+                "line_ref": "",
+                "chunk_refs": [],
+                "symbols": [],
+                "imports": [],
+                "summary": "File processing error.",
+                "numbered_content": "",
             }

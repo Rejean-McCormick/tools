@@ -1,0 +1,29 @@
+==== MASTER INDEX ====
+repo_name: smart_dumper
+root_dir: C:\mycode\Tools\tools\smart_dumper
+generated_at: 2026-05-20T07:19:55.281916
+instructions_file: 00_START_HERE.instructions.md
+upload_helper_file: 
+
+==== VOLUMES ====
+- filename=smart_dumper_20260520_071955_01_ROOT.txt | title=ROOT FILES | short_title=Root | files=7 | size_mb=0.0332
+- filename=smart_dumper_20260520_071955_02_worker.txt | title=FOLDER: worker | short_title=worker | files=10 | size_mb=0.0699
+
+==== FILE LOCATOR (path -> volume) ====
+__init__.py	volume=smart_dumper_20260520_071955_01_ROOT.txt
+constants.py	volume=smart_dumper_20260520_071955_01_ROOT.txt
+gitignore_engine.py	volume=smart_dumper_20260520_071955_01_ROOT.txt
+gui.py	volume=smart_dumper_20260520_071955_01_ROOT.txt
+main.py	volume=smart_dumper_20260520_071955_01_ROOT.txt
+Smart_Dumper-Planned_Upgrade.md	volume=smart_dumper_20260520_071955_01_ROOT.txt
+xml_utils.py	volume=smart_dumper_20260520_071955_01_ROOT.txt
+worker/__init__.py	volume=smart_dumper_20260520_071955_02_worker.txt
+worker/bundles.py	volume=smart_dumper_20260520_071955_02_worker.txt
+worker/dump_worker.py	volume=smart_dumper_20260520_071955_02_worker.txt
+worker/file_collection.py	volume=smart_dumper_20260520_071955_02_worker.txt
+worker/file_processing.py	volume=smart_dumper_20260520_071955_02_worker.txt
+worker/index.py	volume=smart_dumper_20260520_071955_02_worker.txt
+worker/instructions.py	volume=smart_dumper_20260520_071955_02_worker.txt
+worker/smartignore.py	volume=smart_dumper_20260520_071955_02_worker.txt
+worker/writers_text.py	volume=smart_dumper_20260520_071955_02_worker.txt
+worker/writers_xml.py	volume=smart_dumper_20260520_071955_02_worker.txt

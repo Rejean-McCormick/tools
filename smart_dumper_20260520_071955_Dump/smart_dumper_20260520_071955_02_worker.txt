@@ -1,0 +1,1994 @@
+==== VOLUME META ====
+generated_at: 2026-05-20T07:19:55.281095
+title: FOLDER: worker
+root_dir: C:\mycode\Tools\tools\smart_dumper
+file_count: 10
+total_size_mb: 0.0699
+home: 00_START_HERE.instructions.md
+prev_volume: smart_dumper_20260520_071955_01_ROOT.txt
+prev_title: Root
+next_title: 
+short_title: worker
+
+==== FILE_INDEX ====
+ENTRY id=6d725cb94034 path="worker/__init__.py" kind=source size=201 lines=11 chunks=0
+ENTRY id=d9718d384757 path="worker/bundles.py" kind=source size=9332 lines=231 chunks=0
+ENTRY id=5d8b3d641544 path="worker/dump_worker.py" kind=source size=21482 lines=526 chunks=2
+ENTRY id=e2504e78787c path="worker/file_collection.py" kind=source size=4644 lines=127 chunks=0
+ENTRY id=3934172bae9c path="worker/file_processing.py" kind=source size=5352 lines=140 chunks=0
+ENTRY id=85a86caf70c7 path="worker/index.py" kind=source size=4590 lines=101 chunks=0
+ENTRY id=52f714cbfd16 path="worker/instructions.py" kind=source size=5769 lines=151 chunks=0
+ENTRY id=e4b851dc684e path="worker/smartignore.py" kind=source size=6586 lines=181 chunks=0
+ENTRY id=c9afc7cc02be path="worker/writers_text.py" kind=source size=7174 lines=172 chunks=0
+ENTRY id=42886533b414 path="worker/writers_xml.py" kind=source size=8187 lines=216 chunks=0
+
+==== FILES ====
+
+----- FILE BEGIN -----
+path="worker/__init__.py"
+id=6d725cb94034
+kind=source
+size=201
+lines=11
+chunks=0
+----
+# worker/__init__.py
+"""
+Worker package public API.
+
+Keep external imports stable:
+    from yourpkg.worker import DumpWorker
+"""
+
+from .dump_worker import DumpWorker
+
+__all__ = ["DumpWorker"]
+----- FILE END -----
+
+----- FILE BEGIN -----
+path="worker/bundles.py"
+id=d9718d384757
+kind=source
+size=9332
+lines=231
+chunks=0
+----
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Callable, Dict, List, Optional
+
+from ..constants import UPLOAD_HELPER_DOC_PREFIX
+
+
+@dataclass(frozen=True)
+class BundleWriter:
+    """
+    Implements upload-helper artifacts:
+      - single combined upload doc (preferred)
+      - legacy grouped bundles + manifest (CORE / DOCS_TOOLS / TESTS_OTHERS)
+    """
+
+    output_dir: Path
+    output_format: str  # "text" or "xml"
+    create_grouped_bundles: bool
+    check_stop: Callable[[], None]
+    log: Callable[[str], None]
+
+    # New (preferred) mode
+    create_single_upload_doc: bool = False
+    repo_root: Optional[Path] = None  # used to compute repo folder name for "Code_snapshot_<repo>"
+    upload_doc_prefix: str = UPLOAD_HELPER_DOC_PREFIX
+
+    def bundle_extension(self) -> str:
+        if (self.output_format or "").strip().lower() == "xml":
+            return ".xml.txt"
+        return ".txt"
+
+    def _sanitize_filename_component(self, s: str) -> str:
+        if not s:
+            return "Repo"
+        bad = '<>:"/\\|?*'
+        out = []
+        for ch in str(s):
+            if ch in bad or ord(ch) < 32:
+                out.append("_")
+            else:
+                out.append(ch)
+        cleaned = "".join(out).strip()
+        return cleaned or "Repo"
+
+    def default_single_doc_name(self) -> str:
+        repo_name = "Repo"
+        if self.repo_root is not None:
+            try:
+                repo_name = self.repo_root.resolve().name or "Repo"
+            except Exception:
+                repo_name = getattr(self.repo_root, "name", "Repo") or "Repo"
+
+        prefix = (
+            (self.upload_doc_prefix or UPLOAD_HELPER_DOC_PREFIX).strip()
+            or UPLOAD_HELPER_DOC_PREFIX
+        )
+        repo_name = self._sanitize_filename_component(repo_name)
+        return f"{prefix}{repo_name}{self.bundle_extension()}"
+
+    def classify_volume_group(self, meta: dict) -> str:
+        s = " ".join(
+            [
+                str(meta.get("short_title", "")),
+                str(meta.get("title", "")),
+                str(meta.get("filename", "")),
+            ]
+        ).lower()
+
+        if any(k in s for k in ("app", "frontend", "ui", "client", "schema", "schemas", "core")):
+            return "CORE"
+        if any(k in s for k in ("doc", "docs", "readme", "guide", "manual", "tool", "tools", "script", "scripts")):
+            return "DOCS_TOOLS"
+        return "TESTS_OTHERS"
+
+    def write_upload_helper_artifacts(self, generated_meta: List[dict]) -> Dict[str, str]:
+        """
+        Preferred entrypoint: returns either {"single": "<Code_snapshot_Repo.txt>"} OR legacy grouped artifacts.
+        """
+        if self.create_single_upload_doc:
+            out_name = self.write_single_upload_doc(generated_meta)
+            return {"single": out_name} if out_name else {}
+        return self.write_grouped_bundles(generated_meta)
+
+    def write_grouped_bundles(self, generated_meta: List[dict]) -> Dict[str, str]:
+        """
+        Returns mapping:
+            {"CORE": "REPO_CORE.txt", "DOCS_TOOLS": "...", "TESTS_OTHERS": "...", "manifest": "REPO_MANIFEST_GROUPED.md"}
+        """
+        if self.create_single_upload_doc:
+            return {}
+        if not self.create_grouped_bundles or not generated_meta:
+            return {}
+
+        self.check_stop()
+        self.log("Phase 3: Writing grouped bundles (upload helpers)...")
+
+        groups: Dict[str, List[dict]] = {"CORE": [], "DOCS_TOOLS": [], "TESTS_OTHERS": []}
+        for meta in generated_meta:
+            self.check_stop()
+            g = self.classify_volume_group(meta)
+            groups.setdefault(g, []).append(meta)
+
+        artifacts: Dict[str, str] = {}
+        ext = self.bundle_extension()
+
+        for gname, metas in groups.items():
+            self.check_stop()
+            metas = [m for m in metas if m.get("filename")]
+            if not metas:
+                continue
+
+            out_name = f"REPO_{gname}{ext}"
+            out_path = self.output_dir / out_name
+
+            try:
+                with out_path.open("w", encoding="utf-8", errors="replace") as out:
+                    for m in metas:
+                        self.check_stop()
+                        vol_file = self.output_dir / m["filename"]
+                        out.write("\n\n")
+                        out.write(f"===== BEGIN VOLUME {m['filename']} :: {m.get('title','')} =====\n")
+                        with vol_file.open("r", encoding="utf-8", errors="replace") as vf:
+                            for line in vf:
+                                self.check_stop()
+                                out.write(line)
+                        out.write(f"\n===== END VOLUME {m['filename']} =====\n")
+                artifacts[gname] = out_name
+                self.log(f"    -> Created bundle: {out_name}")
+            except Exception as e:
+                self.log(f"    (warn) Could not create bundle {out_name}: {e}")
+
+        manifest_name = "REPO_MANIFEST_GROUPED.md"
+        manifest_path = self.output_dir / manifest_name
+
+        try:
+            with manifest_path.open("w", encoding="utf-8") as mf:
+                mf.write("# Repo bundle (grouped for file upload limits)\n\n")
+                mf.write("## Upload these (recommended)\n")
+                mf.write(f"- `{manifest_name}`\n")
+                for k in ("CORE", "DOCS_TOOLS", "TESTS_OTHERS"):
+                    if k in artifacts:
+                        mf.write(f"- `{artifacts[k]}`\n")
+
+                mf.write("\n## How to navigate\n")
+                mf.write("1) Search in this manifest for the file path you need.\n")
+                mf.write("2) Note the `volume` and `bundle`.\n")
+                if (self.output_format or "").strip().lower() == "xml":
+                    mf.write('3) Open the bundle file and search for `<file path="...">`.\n')
+                else:
+                    mf.write('3) Open the bundle file and search for `path="..."` under `----- FILE BEGIN -----`.\n')
+                mf.write("4) Read the relevant content / chunk(s).\n\n")
+
+                mf.write("## File locator index (path → volume → bundle)\n")
+                mf.write("```text\n")
+                for meta in generated_meta:
+                    self.check_stop()
+                    vol = meta.get("filename", "")
+                    grp = self.classify_volume_group(meta)
+                    bundle = artifacts.get(grp, "")
+                    for p in meta.get("contained_files", []) or []:
+                        self.check_stop()
+                        mf.write(f"{p}\tvolume={vol}\tbundle={bundle or '(none)'}\n")
+                mf.write("```\n")
+
+            artifacts["manifest"] = manifest_name
+            self.log(f"    -> Created manifest: {manifest_name}")
+        except Exception as e:
+            self.log(f"    (warn) Could not create manifest {manifest_name}: {e}")
+
+        return artifacts
+
+    def write_single_upload_doc(
+        self,
+        generated_meta: List[dict],
+        *,
+        out_name: Optional[str] = None,
+        header: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        Writes ONE combined upload-helper file that concatenates all volume files.
+
+        Naming default: "Code_snapshot_<repo_folder_name><ext>"
+        where <repo_folder_name> comes from repo_root.name.
+
+        Returns the filename on success, else None.
+        """
+        if not generated_meta:
+            return None
+
+        self.check_stop()
+
+        final_name = out_name or self.default_single_doc_name()
+        out_path = self.output_dir / final_name
+
+        if header is None:
+            header = (
+                "# Single upload doc\n\n"
+                f"- generated_at: {datetime.now().isoformat()}\n"
+                f"- output_format: {(self.output_format or '').strip().lower() or 'text'}\n"
+                f"- volumes: {len([m for m in generated_meta if m.get('filename')])}\n"
+            )
+
+        try:
+            with out_path.open("w", encoding="utf-8", errors="replace") as out:
+                if header:
+                    out.write(header.rstrip() + "\n\n")
+
+                for m in generated_meta:
+                    self.check_stop()
+                    if not m.get("filename"):
+                        continue
+
+                    vol_file = self.output_dir / m["filename"]
+                    out.write("\n\n")
+                    out.write(f"===== BEGIN VOLUME {m['filename']} :: {m.get('title','')} =====\n")
+
+                    with vol_file.open("r", encoding="utf-8", errors="replace") as vf:
+                        for line in vf:
+                            self.check_stop()
+                            out.write(line)
+
+                    out.write(f"\n===== END VOLUME {m['filename']} =====\n")
+
+            self.log(f"    -> Created single upload doc: {final_name}")
+            return final_name
+        except Exception as e:
+            self.log(f"    (warn) Could not create single upload doc {final_name}: {e}")
+            return None
+----- FILE END -----
+
+----- FILE BEGIN -----
+path="worker/dump_worker.py"
+id=5d8b3d641544
+kind=source
+size=21482
+lines=526
+chunks=2
+
+--- CHUNK BEGIN ---
+id=5d8b3d641544:1-350
+start=1
+end=350
+----
+# worker/dump_worker.py
+from __future__ import annotations
+
+import os
+import traceback
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
+
+from ..constants import (
+    ALWAYS_IGNORE_DIRS,
+    CHUNK_MAX_LINES,
+    INSTRUCTIONS_FILENAME,
+    OVERSIZE_BYTES,
+    UPLOAD_HELPER_DOC_PREFIX,
+)
+from ..gitignore_engine import GitIgnoreEngine
+
+from .bundles import BundleWriter
+from .file_collection import FileCollectionMixin
+from .file_processing import FileProcessor
+from .index import IndexWriterMixin
+from .instructions import InstructionsWriter
+from .smartignore import SmartIgnore
+from .writers_text import WritersTextMixin
+from .writers_xml import (
+    index_filename_xml,
+    maybe_write_txt_companion,
+    normalize_volume_filename_xml,
+    write_volume_xml,
+)
+
+
+class DumpWorker(FileCollectionMixin, WritersTextMixin, IndexWriterMixin):
+    """
+    Orchestrator for repository dumps.
+
+    Output formats:
+      - output_format="text": structured plain-text volumes (DEFAULT)
+      - output_format="xml" : XML volumes (optional)
+
+    XML txt_mode:
+      - "none": .xml only
+      - "copy": .xml and also .xml.txt companions (for indexing)
+      - "only": .xml.txt only (no .xml)
+
+    Upload helper:
+      - create_single_upload_doc=True => one combined file: "Code_snapshot_<repo_folder><ext>"
+      - create_grouped_bundles=True  => legacy grouped bundles + manifest
+    """
+
+    def __init__(
+        self,
+        root_dir: Path,
+        output_dir: Path,
+        max_output_files: int,
+        ignore_txt: bool,
+        ignore_md: bool,
+        create_index: bool,
+        custom_excludes: List[Path],
+        exclusion_mode: str,
+        log_callback: Callable[[str], None],
+        overwrite_callback: Callable[[str], bool],
+        stop_event: Any,
+        *,
+        output_format: str = "text",
+        txt_mode: str = "copy",
+        # Legacy option (kept for backward compatibility)
+        create_grouped_bundles: bool = False,
+        # Preferred option (single combined upload helper doc)
+        create_single_upload_doc: Optional[bool] = None,
+        upload_doc_prefix: str = UPLOAD_HELPER_DOC_PREFIX,
+        # .smartignore options
+        use_smartignore_exclude: bool = False,
+        create_smartignore_paths_index: bool = False,
+    ):
+        self.root_dir = Path(root_dir).resolve()
+        self.output_dir = Path(output_dir).resolve()
+
+        self.max_output_files = max(2, int(max_output_files))
+        self.ignore_txt = bool(ignore_txt)
+        self.ignore_md = bool(ignore_md)
+        self.create_index = bool(create_index)
+        self.custom_excludes = [Path(p).resolve() for p in (custom_excludes or [])]
+        self.exclusion_mode = str(exclusion_mode or "")
+
+        self.log = log_callback
+        self.ask_overwrite = overwrite_callback
+        self.stop_event = stop_event
+
+        self.tracked_custom_exclusions: List[str] = []
+
+        # Keep legacy attribute names used by older code
+        self.instructions_filename = INSTRUCTIONS_FILENAME
+        self.INSTRUCTIONS_FILENAME = self.instructions_filename
+        self.chunk_max_lines = int(CHUNK_MAX_LINES)
+        self.CHUNK_MAX_LINES = self.chunk_max_lines
+        self.oversize_bytes = int(OVERSIZE_BYTES)
+
+        # output format
+        self.output_format = (output_format or "text").strip().lower()
+        if self.output_format not in ("text", "xml"):
+            self.output_format = "text"
+
+        # xml txt_mode
+        self.txt_mode = (txt_mode or "none").strip().lower()
+        if self.txt_mode not in ("none", "copy", "only"):
+            self.txt_mode = "copy"
+
+        # Upload helper mode resolution:
+        # - New GUI passes create_single_upload_doc explicitly.
+        # - Old GUI uses create_grouped_bundles checkbox: treat that as "create upload helper" and default to single doc.
+        if create_single_upload_doc is None:
+            self.create_single_upload_doc = bool(create_grouped_bundles)
+            self.create_grouped_bundles = False  # legacy grouped output disabled by default
+        else:
+            self.create_single_upload_doc = bool(create_single_upload_doc)
+            self.create_grouped_bundles = bool(create_grouped_bundles)
+
+        self.upload_doc_prefix = (
+            (upload_doc_prefix or UPLOAD_HELPER_DOC_PREFIX).strip()
+            or UPLOAD_HELPER_DOC_PREFIX
+        )
+
+        # .smartignore
+        self.use_smartignore_exclude = bool(use_smartignore_exclude)
+        self.create_smartignore_paths_index = bool(create_smartignore_paths_index)
+        self.smartignore = SmartIgnore(
+            root_dir=self.root_dir,
+            log=self.log,
+            use_smartignore_exclude=self.use_smartignore_exclude,
+            create_smartignore_paths_index=self.create_smartignore_paths_index,
+        )
+        self.smartignore.load()
+        # Compat attributes expected by FileCollectionMixin
+        self.smartignore_patterns = self.smartignore.patterns
+        self.smartignore_file = self.smartignore.smartignore_file
+
+        # If an unexpected error happens in the worker thread, store it so the GUI can show it.
+        self.last_exception_traceback: Optional[str] = None
+
+        self.gitignore = GitIgnoreEngine(
+            root_dir=self.root_dir,
+            always_ignore_dirs=ALWAYS_IGNORE_DIRS,
+            log=self.log,
+            check_stop=self.check_stop,
+            is_custom_excluded=self.is_custom_excluded,
+            exclusion_mode_getter=lambda: self.exclusion_mode,
+        )
+        self.gitignore.load_all_gitignores()
+
+        self.file_processor = FileProcessor(
+            root_dir=self.root_dir,
+            chunk_max_lines=self.chunk_max_lines,
+            oversize_bytes=self.oversize_bytes,
+            stop_event=self.stop_event,
+            is_custom_excluded=self.is_custom_excluded,
+            exclusion_mode_getter=lambda: self.exclusion_mode,
+            get_file_size=self.get_file_size,
+            check_stop=self.check_stop,
+        )
+
+    # -----------------------------
+    # Core helpers
+    # -----------------------------
+
+    def check_stop(self) -> None:
+        if getattr(self.stop_event, "is_set", lambda: False)():
+            raise InterruptedError("Stopped by user.")
+
+    def is_custom_excluded(self, path: Path) -> bool:
+        if not self.custom_excludes:
+            return False
+        p = Path(path).resolve()
+        for exc in self.custom_excludes:
+            if p == exc or exc in p.parents:
+                return True
+        return False
+
+    def get_file_size(self, f: Path) -> int:
+        try:
+            return int(Path(f).stat().st_size)
+        except Exception:
+            return 0
+
+    # -----------------------------
+    # .smartignore glue for FileCollectionMixin
+    # -----------------------------
+
+    def _smartignore_match(self, rel_posix: str, *, is_dir: bool) -> bool:
+        return self.smartignore.match(rel_posix, is_dir=is_dir)
+
+    def _record_smartignore_match(self, rel_posix: str, is_dir: bool) -> None:
+        if not self.create_smartignore_paths_index:
+            return
+        self.smartignore.matched_paths.add(rel_posix)
+        if is_dir:
+            self.smartignore.matched_dirs.add(rel_posix)
+
+    def write_smartignore_paths_index(self) -> None:
+        self.smartignore.write_paths_index(output_dir=self.output_dir, check_stop=self.check_stop)
+
+    # -----------------------------
+    # Filename helpers
+    # -----------------------------
+
+    def _normalize_volume_filename(self, name: str) -> str:
+        """
+        Normalize a planned volume filename to the correct extension for the current output mode.
+        """
+        base = str(name or "").strip()
+        for suf in (".xml.txt", ".xml", ".txt", ".md"):
+            if base.lower().endswith(suf):
+                base = base[: -len(suf)]
+                break
+
+        if self.output_format == "xml":
+            return normalize_volume_filename_xml(base + ".xml", self.txt_mode)
+
+        return base + ".txt"
+
+    def _index_filename(self) -> str:
+        if self.output_format == "xml":
+            return index_filename_xml(self.txt_mode)
+        return "Index.txt"
+
+    def _maybe_write_txt_companion(self, p: Path) -> None:
+        # Used by IndexWriterMixin in xml mode.
+        if self.output_format != "xml":
+            return
+        if (self.txt_mode or "").strip().lower() != "copy":
+            return
+        if Path(p).suffix.lower() != ".xml":
+            return
+        maybe_write_txt_companion(
+            src_xml_path=Path(p),
+            txt_mode=self.txt_mode,
+            log=self.log,
+            check_stop=self.check_stop,
+        )
+
+    # -----------------------------
+    # File processing glue for WritersTextMixin
+    # -----------------------------
+
+    def _process_file_content(self, f: Path) -> Optional[Dict[str, Any]]:
+        return self.file_processor.process_file_content(Path(f))
+
+    # -----------------------------
+    # Volume writers
+    # -----------------------------
+
+    def write_volume(self, filename: str, files: List[Path], title: str, nav_context: dict) -> Optional[dict]:
+        if self.output_format == "xml":
+            return self.write_volume_xml(filename, files, title, nav_context)
+        return self.write_volume_text(filename, files, title, nav_context)
+
+    def write_volume_xml(self, filename: str, files: List[Path], title: str, nav_context: dict) -> Optional[dict]:
+        if not files:
+            return None
+
+        self.check_stop()
+
+        # Stable ordering (like legacy)
+        try:
+            files.sort(key=lambda p: p.relative_to(self.root_dir).as_posix().lower())
+        except Exception:
+            files.sort(key=lambda p: p.name.lower())
+
+        file_data_list, size_mb = self._collect_file_data_parallel(files, filename)
+        return write_volume_xml(
+            output_dir=self.output_dir,
+            root_dir=self.root_dir,
+            filename=filename,
+            files=files,
+            title=title,
+            nav_context=nav_context,
+            file_data_list=file_data_list,
+            size_mb=size_mb,
+            txt_mode=self.txt_mode,
+            log=self.log,
+            check_stop=self.check_stop,
+        )
+
+    # -----------------------------
+    # Main
+    # -----------------------------
+
+    def run(self) -> None:
+        try:
+            self.log(f"Scanning structure of: {self.root_dir}")
+
+            repo_name = self.root_dir.name
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            base_name_pattern = f"{repo_name}_{ts}"
+
+            run_folder_name = f"{base_name_pattern}_Dump"
+            self.output_dir = (self.output_dir / run_folder_name).resolve()
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            self.log(f"Output Target: {self.output_dir}")
+
+            # Auto-exclude output folder from dumps (if inside repo)
+            try:
+                _ = self.output_dir.relative_to(self.root_dir)
+                if self.output_dir not in self.custom_excludes:
+                    self.custom_excludes.append(self.output_dir)
+            except Exception:
+                pass
+
+            # Phase 1: gather files
+            self.check_stop()
+            self.log("Phase 1: Finding Files.")
+            root_files = self.collect_files_in_folder(self.root_dir, recursive=False)
+
+            top_level_items: List[Path] = []
+            for item in os.listdir(self.root_dir):
+                self.check_stop()
+
+                full_path = (self.root_dir / item).resolve()
+                if not full_path.is_dir():
+                    continue
+
+                if item in ALWAYS_IGNORE_DIRS:
+                    continue
+
+                # smartignore dir decision at top level too
+                if self.smartignore.patterns:
+                    rel_dir = self.smartignore.rel_posix(full_path)
+                    if self.smartignore.should_exclude(rel_dir, is_dir=True):
+                        continue
+
+                if self.gitignore.match_ignore(full_path, is_dir=True):
+                    continue
+
+                if self.is_custom_excluded(full_path):
+                    try:
+                        rel = full_path.relative_to(self.root_dir)
+                    except Exception:
+                        rel = full_path
+                    self.tracked_custom_exclusions.append(str(rel) + " (DIR)")
+                    if self.exclusion_mode == "Fully Exclude":
+                        continue
+
+                top_level_items.append(full_path)
+
+            analyzed_folders: List[Dict[str, Any]] = []
+            for i, folder in enumerate(top_level_items):
+                self.check_stop()
+                if i % 5 == 0:
+                    self.log(f"    Scanning folder: {folder.name}.")
+--- CHUNK END ---
+
+--- CHUNK BEGIN ---
+id=5d8b3d641544:351-526
+start=351
+end=526
+----
+
+                f_files = self.collect_files_in_folder(folder, recursive=True)
+                if f_files:
+                    size = 0 if self.is_custom_excluded(folder) else sum(self.get_file_size(f) for f in f_files)
+                    analyzed_folders.append({"name": folder.name, "files": f_files, "size": int(size)})
+
+            analyzed_folders.sort(key=lambda x: int(x.get("size", 0)), reverse=True)
+
+            planned_dumps: List[Dict[str, Any]] = []
+            index_filename = self._index_filename()
+            instructions_filename = self.instructions_filename
+
+            # TOTAL desired outputs for: volumes + (index?) + instructions
+            available_slots = int(self.max_output_files)
+            available_slots -= 1  # instructions
+            if self.create_index:
+                available_slots -= 1  # index
+            if available_slots < 1:
+                available_slots = 1
+                self.log("Note: max_output_files is very small; forcing at least 1 volume.")
+
+            if root_files and available_slots > 0:
+                available_slots -= 1
+                fname = self._normalize_volume_filename(f"{base_name_pattern}_01_ROOT.xml")
+                planned_dumps.append(
+                    {"filename": fname, "files": root_files, "title": "ROOT FILES", "short_title": "Root"}
+                )
+
+            start_idx = len(planned_dumps) + 1
+
+            if len(analyzed_folders) <= available_slots:
+                for i, folder in enumerate(analyzed_folders):
+                    idx = start_idx + i
+                    fname = self._normalize_volume_filename(f"{base_name_pattern}_{idx:02d}_{folder['name']}.xml")
+                    planned_dumps.append(
+                        {
+                            "filename": fname,
+                            "files": folder["files"],
+                            "title": f"FOLDER: {folder['name']}",
+                            "short_title": folder["name"],
+                        }
+                    )
+            else:
+                distinct_count = max(0, available_slots - 1)
+                top_folders = analyzed_folders[:distinct_count]
+                remaining_folders = analyzed_folders[distinct_count:]
+
+                for i, folder in enumerate(top_folders):
+                    idx = start_idx + i
+                    fname = self._normalize_volume_filename(f"{base_name_pattern}_{idx:02d}_{folder['name']}.xml")
+                    planned_dumps.append(
+                        {
+                            "filename": fname,
+                            "files": folder["files"],
+                            "title": f"FOLDER: {folder['name']}",
+                            "short_title": folder["name"],
+                        }
+                    )
+
+                others_files: List[Path] = []
+                for folder in remaining_folders:
+                    others_files.extend(folder["files"])
+
+                if others_files:
+                    fname = self._normalize_volume_filename(f"{base_name_pattern}_99_OTHERS.xml")
+                    planned_dumps.append(
+                        {
+                            "filename": fname,
+                            "files": others_files,
+                            "title": "OTHERS (Misc Folders)",
+                            "short_title": "Others",
+                        }
+                    )
+
+            self.log(f"Phase 2: Writing {len(planned_dumps)} volumes.")
+            generated_meta: List[dict] = []
+
+            for i, dump in enumerate(planned_dumps):
+                self.check_stop()
+                prev_d = planned_dumps[i - 1] if i > 0 else None
+                next_d = planned_dumps[i + 1] if i < len(planned_dumps) - 1 else None
+
+                nav = {
+                    "home_file": instructions_filename,
+                    "prev_file": prev_d["filename"] if prev_d else None,
+                    "next_file": next_d["filename"] if next_d else None,
+                    "prev_title": prev_d["short_title"] if prev_d else "",
+                    "next_title": next_d["short_title"] if next_d else "",
+                    "short_title": dump["short_title"],
+                }
+
+                meta = self.write_volume(dump["filename"], dump["files"], dump["title"], nav)
+                if meta:
+                    generated_meta.append(meta)
+
+            # Phase 3: upload helper (single doc preferred)
+            bundle_artifacts: Dict[str, str] = {}
+            upload_doc_filename: Optional[str] = None
+            upload_helper_file_for_index: Optional[str] = None
+
+            if self.create_single_upload_doc or self.create_grouped_bundles:
+                self.check_stop()
+                bw = BundleWriter(
+                    output_dir=self.output_dir,
+                    output_format=self.output_format,
+                    create_grouped_bundles=self.create_grouped_bundles,
+                    check_stop=self.check_stop,
+                    log=self.log,
+                    create_single_upload_doc=self.create_single_upload_doc,
+                    repo_root=self.root_dir,
+                    upload_doc_prefix=self.upload_doc_prefix,
+                )
+                bundle_artifacts = bw.write_upload_helper_artifacts(generated_meta) or {}
+
+                upload_doc_filename = bundle_artifacts.get("single")
+                if upload_doc_filename:
+                    upload_helper_file_for_index = upload_doc_filename
+                else:
+                    # Legacy: point index at manifest if available
+                    upload_helper_file_for_index = bundle_artifacts.get("manifest")
+
+            # Index
+            if self.create_index:
+                self.write_index(
+                    index_filename,
+                    repo_name,
+                    instructions_filename,
+                    generated_meta,
+                    upload_helper_file=upload_helper_file_for_index,
+                )
+
+            # smartignore index file (paths matched)
+            self.write_smartignore_paths_index()
+
+            # instructions last
+            iw = InstructionsWriter(
+                output_dir=self.output_dir,
+                instructions_filename=instructions_filename,
+                output_format=self.output_format,
+                smartignore_file=self.smartignore.smartignore_file,
+                smartignore_patterns=list(self.smartignore.patterns),
+                use_smartignore_exclude=self.use_smartignore_exclude,
+                create_smartignore_paths_index=self.create_smartignore_paths_index,
+                check_stop=self.check_stop,
+                log=self.log,
+                ask_overwrite=self.ask_overwrite,
+            )
+            iw.write(
+                index_filename=index_filename if self.create_index else None,
+                generated_meta=generated_meta,
+                bundle_artifacts=bundle_artifacts if bundle_artifacts else None,
+                upload_doc_filename=upload_doc_filename,
+            )
+
+            # Excluded files report
+            if self.tracked_custom_exclusions:
+                report_path = self.output_dir / "ExcludedFilesReport.txt"
+                try:
+                    unique_exclusions = sorted(set(self.tracked_custom_exclusions))
+                    with report_path.open("w", encoding="utf-8") as rf:
+                        rf.write(f" EXCLUDED FILES REPORT - {datetime.now()}\n")
+                        rf.write(" Excluded by 'Custom Path Exclusions'.\n\n")
+                        for line in unique_exclusions:
+                            rf.write(f"{line}\n")
+                    self.log("-> Created Exclusion Report.")
+                except Exception as e:
+                    self.log(f"Could not write exclusion report: {e}")
+
+            self.log(f"\nSUCCESS! Completed in:\n{self.output_dir}")
+
+        except InterruptedError:
+            self.log("\n!!! PROCESS STOPPED BY USER !!!")
+        except Exception:
+            self.last_exception_traceback = traceback.format_exc()
+            self.log("ERROR: Unhandled exception in DumpWorker.")
+            self.log(self.last_exception_traceback)
+--- CHUNK END ---
+----- FILE END -----
+
+----- FILE BEGIN -----
+path="worker/file_collection.py"
+id=e2504e78787c
+kind=source
+size=4644
+lines=127
+chunks=0
+----
+# smart_wiki_dumper/worker/file_collection.py
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import List
+
+from ..constants import ALWAYS_IGNORE_DIRS, ALWAYS_IGNORE_EXT, ALWAYS_IGNORE_FILES
+
+
+class FileCollectionMixin:
+    """
+    Mixin extracted from DumpWorker.
+
+    Requires the host class to provide:
+      - self.root_dir: Path
+      - self.ignore_txt: bool
+      - self.ignore_md: bool
+      - self.exclusion_mode: str
+      - self.tracked_custom_exclusions: list[str]
+      - self.smartignore_patterns: list[str]
+      - self.use_smartignore_exclude: bool
+      - self.gitignore with method match_ignore(path: Path, is_dir: bool) -> bool
+      - methods:
+          * check_stop() -> None
+          * is_custom_excluded(path: Path) -> bool
+          * _smartignore_match(rel_posix: str, *, is_dir: bool) -> bool
+          * _record_smartignore_match(rel_posix: str, is_dir: bool) -> None
+    """
+
+    def collect_files_in_folder(self, folder_path: Path, recursive: bool = True) -> List[Path]:
+        valid_files: List[Path] = []
+
+        folder_path = folder_path.resolve()
+        if recursive:
+            iterator = os.walk(folder_path, followlinks=True)
+        else:
+            try:
+                iterator = [next(os.walk(folder_path, followlinks=True))]
+            except StopIteration:
+                return []
+
+        for dirpath, dirnames, filenames in iterator:
+            self.check_stop()
+            current_dir = Path(dirpath).resolve()
+
+            safe_dirs: List[str] = []
+            for d in dirnames:
+                if d in ALWAYS_IGNORE_DIRS:
+                    continue
+
+                full_dir_path = (current_dir / d).resolve()
+
+                # smartignore directory check (relative to repo root when possible)
+                try:
+                    rel_dir = full_dir_path.relative_to(self.root_dir).as_posix()
+                except Exception:
+                    rel_dir = full_dir_path.as_posix()
+
+                if self.smartignore_patterns:
+                    m = self._smartignore_match(rel_dir, is_dir=True)
+                    if m:
+                        self._record_smartignore_match(rel_dir, is_dir=True)
+                        if self.use_smartignore_exclude:
+                            continue
+
+                if self.gitignore.match_ignore(full_dir_path, is_dir=True):
+                    continue
+
+                if self.is_custom_excluded(full_dir_path):
+                    try:
+                        rel = full_dir_path.relative_to(self.root_dir)
+                    except Exception:
+                        rel = full_dir_path
+                    self.tracked_custom_exclusions.append(str(rel) + " (DIR)")
+                    if self.exclusion_mode == "Fully Exclude":
+                        continue
+
+                safe_dirs.append(d)
+
+            # prune traversal
+            dirnames[:] = safe_dirs
+
+            for f in filenames:
+                self.check_stop()
+
+                fpath = (current_dir / f).resolve()
+                ext = fpath.suffix.lower()
+
+                if f in ALWAYS_IGNORE_FILES:
+                    continue
+                if ext in ALWAYS_IGNORE_EXT:
+                    continue
+
+                # smartignore file check (relative to repo root when possible)
+                try:
+                    rel_file = fpath.relative_to(self.root_dir).as_posix()
+                except Exception:
+                    rel_file = fpath.as_posix()
+
+                if self.smartignore_patterns:
+                    m = self._smartignore_match(rel_file, is_dir=False)
+                    if m:
+                        self._record_smartignore_match(rel_file, is_dir=False)
+                        if self.use_smartignore_exclude:
+                            continue
+
+                if self.gitignore.match_ignore(fpath, is_dir=False):
+                    continue
+
+                if self.is_custom_excluded(fpath):
+                    try:
+                        rel = fpath.relative_to(self.root_dir)
+                    except Exception:
+                        rel = fpath
+                    self.tracked_custom_exclusions.append(str(rel))
+                    if self.exclusion_mode == "Fully Exclude":
+                        continue
+
+                if self.ignore_txt and ext == ".txt":
+                    continue
+                if self.ignore_md and ext == ".md":
+                    continue
+
+                valid_files.append(fpath)
+
+        return valid_files
+----- FILE END -----
+
+----- FILE BEGIN -----
+path="worker/file_processing.py"
+id=3934172bae9c
+kind=source
+size=5352
+lines=140
+chunks=0
+----
+# worker/file_processing.py
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Dict, Optional
+
+from ..xml_utils import chunk_lines_keepends, short_sha1
+
+
+@dataclass(frozen=True)
+class FileProcessor:
+    """
+    Responsible for reading a single file and returning normalized metadata + content/chunks.
+
+    Extracted from DumpWorker._process_file_content(), with improved stop-handling and
+    safer rel_path computation.
+    """
+
+    root_dir: Path
+    chunk_max_lines: int
+    oversize_bytes: int
+    stop_event: Any  # threading.Event-like (needs .is_set())
+    is_custom_excluded: Callable[[Path], bool]
+    exclusion_mode_getter: Callable[[], str]
+    get_file_size: Callable[[Path], int]
+    check_stop: Optional[Callable[[], None]] = None  # optional: raise InterruptedError
+
+    def _stop_now(self) -> bool:
+        return bool(getattr(self.stop_event, "is_set", lambda: False)())
+
+    def _check_stop(self) -> None:
+        if self.check_stop is not None:
+            self.check_stop()
+            return
+        if self._stop_now():
+            raise InterruptedError("Stopped by user.")
+
+    def process_file_content(self, f: Path) -> Optional[Dict[str, Any]]:
+        """
+        Returns:
+            dict with keys:
+              rel_path, ext, size_bytes, line_count, kind, file_id, chunks, content
+            or None if stop_event is already set before starting.
+        """
+        if self._stop_now():
+            return None
+
+        try:
+            # Stop-check early (for consistent behavior with DumpWorker.check_stop)
+            self._check_stop()
+
+            try:
+                rel_path = f.relative_to(self.root_dir).as_posix()
+            except Exception:
+                rel_path = f.as_posix()
+
+            ext = f.suffix.lower()
+            is_excluded_path = self.is_custom_excluded(f)
+            exclusion_mode = (self.exclusion_mode_getter() or "").strip()
+
+            size_bytes = 0
+            line_count = 0
+            content = ""
+            kind = "source"
+
+            if is_excluded_path:
+                if "Names" in exclusion_mode:
+                    # "list_name_only": content omitted, only path is meaningful
+                    content = ""
+                    kind = "list_name_only"
+                    size_bytes = 0
+                else:
+                    # "metadata_only": size captured, content omitted
+                    size_bytes = int(self.get_file_size(f))
+                    content = ""
+                    kind = "metadata_only"
+            else:
+                size_bytes = int(self.get_file_size(f))
+                if size_bytes > int(self.oversize_bytes):
+                    content = f"SKIPPED_OVERSIZED: {size_bytes} bytes"
+                    kind = "oversized"
+                else:
+                    self._check_stop()
+                    content = f.read_text(encoding="utf-8", errors="replace")
+                    self._check_stop()
+                    line_count = len(content.splitlines())
+                    kind = "markdown" if ext == ".md" else "source"
+
+            # Stable ID (content-hash when we actually include content, otherwise metadata-hash)
+            if kind in ("source", "markdown") and content and size_bytes <= int(self.oversize_bytes):
+                file_id = short_sha1(rel_path + "\n" + content)
+            else:
+                file_id = short_sha1(f"{rel_path}\n{size_bytes}\n{kind}")
+
+            # Chunk big files
+            chunks = None
+            if kind in ("source", "markdown") and content and line_count > int(self.chunk_max_lines):
+                self._check_stop()
+                raw_chunks = chunk_lines_keepends(content, int(self.chunk_max_lines))
+                chunks = []
+                for c in raw_chunks:
+                    self._check_stop()
+                    chunk_id = f"{file_id}:{c['start_line']}-{c['end_line']}"
+                    chunks.append(
+                        {
+                            "id": chunk_id,
+                            "start_line": int(c["start_line"]),
+                            "end_line": int(c["end_line"]),
+                            "text": c["text"],
+                        }
+                    )
+                content = ""  # content is now carried by chunks
+
+            return {
+                "rel_path": rel_path,
+                "ext": ext,
+                "size_bytes": int(size_bytes),
+                "line_count": int(line_count),
+                "kind": kind,
+                "file_id": file_id,
+                "chunks": chunks,
+                "content": content,
+            }
+
+        except InterruptedError:
+            return None
+        except Exception as e:
+            # Keep worker resilient: return an error pseudo-entry
+            safe_name = getattr(f, "name", "unknown")
+            return {
+                "rel_path": safe_name,
+                "ext": "",
+                "size_bytes": 0,
+                "line_count": 0,
+                "kind": "error",
+                "file_id": short_sha1(safe_name),
+                "chunks": None,
+                "content": f"{type(e).__name__}: {e}",
+            }
+----- FILE END -----
+
+----- FILE BEGIN -----
+path="worker/index.py"
+id=85a86caf70c7
+kind=source
+size=4590
+lines=101
+chunks=0
+----
+# smart_wiki_dumper/worker/index.py
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+from typing import List, Optional
+
+from ..xml_utils import escape_xml_text
+
+
+class IndexWriterMixin:
+    """
+    Index writer extracted from DumpWorker.
+
+    Requires the host class to provide:
+      - self.root_dir: Path
+      - self.output_dir: Path
+      - self.output_format: str  ("text" or "xml")
+      - self.txt_mode: str       ("none" | "copy" | "only")  [used indirectly by _maybe_write_txt_companion]
+      - self.log: callable(str) -> None
+      - self.ask_overwrite: callable(str) -> bool
+      - methods:
+          * check_stop() -> None
+          * _maybe_write_txt_companion(path: Path) -> None
+    """
+
+    def write_index(
+        self,
+        index_filename: str,
+        repo_name: str,
+        instructions_filename: str,
+        generated_meta: List[dict],
+        *,
+        upload_helper_file: Optional[str] = None,
+    ) -> None:
+        index_path = self.output_dir / index_filename
+        should_write = True
+
+        if index_path.exists():
+            self.log(f"Index file {index_filename} already exists.")
+            if not self.ask_overwrite(index_filename):
+                should_write = False
+                self.log("Skipping index.")
+            else:
+                self.log("Overwriting index.")
+
+        if not should_write:
+            return
+
+        if self.output_format == "xml":
+            with index_path.open("w", encoding="utf-8") as f:
+                f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+                f.write("<index>\n")
+                f.write(f"  <repo_name>{escape_xml_text(repo_name)}</repo_name>\n")
+                f.write(f"  <root_dir>{escape_xml_text(str(self.root_dir))}</root_dir>\n")
+                f.write(f"  <generated_at>{datetime.now().isoformat()}</generated_at>\n")
+                f.write(f"  <instructions_file>{escape_xml_text(instructions_filename)}</instructions_file>\n")
+                if upload_helper_file:
+                    f.write(f"  <upload_helper_file>{escape_xml_text(upload_helper_file)}</upload_helper_file>\n")
+                f.write("  <volumes>\n")
+                for meta in generated_meta:
+                    f.write("    <volume>\n")
+                    f.write(f"      <filename>{escape_xml_text(meta['filename'])}</filename>\n")
+                    f.write(f"      <title>{escape_xml_text(meta['title'])}</title>\n")
+                    f.write(f"      <short_title>{escape_xml_text(meta.get('short_title',''))}</short_title>\n")
+                    f.write(f"      <size_mb>{round(meta['size_mb'], 4)}</size_mb>\n")
+                    f.write(f"      <file_count>{meta['file_count']}</file_count>\n")
+                    f.write("      <contained_files>\n")
+                    for cfile in meta["contained_files"]:
+                        f.write(f"        <file>{escape_xml_text(cfile)}</file>\n")
+                    f.write("      </contained_files>\n")
+                    f.write("    </volume>\n")
+                f.write("  </volumes>\n")
+                f.write("</index>\n")
+
+            self.log(f"-> Created Master Index: {index_filename}")
+            self._maybe_write_txt_companion(index_path)
+            return
+
+        # text index
+        with index_path.open("w", encoding="utf-8", errors="replace") as out:
+            out.write("==== MASTER INDEX ====\n")
+            out.write(f"repo_name: {repo_name}\n")
+            out.write(f"root_dir: {self.root_dir}\n")
+            out.write(f"generated_at: {datetime.now().isoformat()}\n")
+            out.write(f"instructions_file: {instructions_filename}\n")
+            out.write(f"upload_helper_file: {upload_helper_file or ''}\n\n")
+            out.write("==== VOLUMES ====\n")
+            for meta in generated_meta:
+                out.write(
+                    f"- filename={meta.get('filename','')} | title={meta.get('title','')} | "
+                    f"short_title={meta.get('short_title','')} | files={meta.get('file_count',0)} | "
+                    f"size_mb={round(meta.get('size_mb',0.0),4)}\n"
+                )
+            out.write("\n==== FILE LOCATOR (path -> volume) ====\n")
+            for meta in generated_meta:
+                vol = meta.get("filename", "")
+                for p in meta.get("contained_files", []) or []:
+                    out.write(f"{p}\tvolume={vol}\n")
+
+        self.log(f"-> Created Master Index: {index_filename}")
+----- FILE END -----
+
+----- FILE BEGIN -----
+path="worker/instructions.py"
+id=52f714cbfd16
+kind=source
+size=5769
+lines=151
+chunks=0
+----
+# worker/instructions.py
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Dict, List, Optional
+
+
+@dataclass(frozen=True)
+class InstructionsWriter:
+    """
+    Extracted from DumpWorker.write_instructions_file().
+    Writes the "START HERE" instructions markdown file.
+    """
+
+    output_dir: Path
+    instructions_filename: str
+    output_format: str  # "text" or "xml"
+    smartignore_file: Path
+    smartignore_patterns: List[str]
+    use_smartignore_exclude: bool
+    create_smartignore_paths_index: bool
+
+    check_stop: Callable[[], None]
+    log: Callable[[str], None]
+    ask_overwrite: Callable[[str], bool]
+
+    def write(
+        self,
+        *,
+        index_filename: Optional[str],
+        generated_meta: List[dict],
+        # Backward compatible: old grouped bundles mapping (CORE/DOCS_TOOLS/TESTS_OTHERS + manifest)
+        bundle_artifacts: Optional[Dict[str, str]] = None,
+        # New: single upload-helper doc filename (preferred)
+        upload_doc_filename: Optional[str] = None,
+    ) -> None:
+        self.check_stop()
+
+        out_path = self.output_dir / self.instructions_filename
+        should_write = True
+
+        if out_path.exists():
+            self.log(f"Instructions file {self.instructions_filename} already exists.")
+            if not self.ask_overwrite(self.instructions_filename):
+                should_write = False
+                self.log("Skipping instructions file.")
+            else:
+                self.log("Overwriting instructions file.")
+
+        if not should_write:
+            return
+
+        volumes_list = "\n".join([f"- {m.get('filename','')}  —  {m.get('title','')}" for m in generated_meta])
+
+        # Navigation first-step
+        if upload_doc_filename:
+            next_step = (
+                f"1) Open `{upload_doc_filename}` (single combined upload doc) and search for the path you need.\n"
+            )
+            if index_filename:
+                next_step += f"   (Optional) Use `{index_filename}` to locate the relevant volume faster.\n"
+        else:
+            if index_filename:
+                next_step = f"1) Open `{index_filename}` (master index) and use it to locate the right volume.\n"
+            else:
+                next_step = "1) No master index was generated. Use the volume files directly.\n"
+
+        smartignore_block = ""
+        if self.smartignore_patterns:
+            smartignore_block = (
+                "\n## .smartignore\n"
+                f"- Found `{self.smartignore_file.name}` with {len(self.smartignore_patterns)} pattern(s).\n"
+                f"- Exclusion enabled: {self.use_smartignore_exclude}\n"
+                f"- Smartignore index enabled: {self.create_smartignore_paths_index}\n"
+                f"- Smartignore paths index file: `SmartignorePathsIndex.txt` (if enabled)\n"
+            )
+
+        upload_helpers_block = ""
+
+        # Prefer explicit single-doc arg
+        single_doc = upload_doc_filename
+
+        # Fallback: allow passing it through bundle_artifacts (for convenience)
+        if not single_doc and bundle_artifacts:
+            for k in ("upload_doc", "single_upload_doc", "single", "doc"):
+                v = bundle_artifacts.get(k)
+                if v:
+                    single_doc = v
+                    break
+
+        if single_doc:
+            upload_helpers_block = (
+                "\n## ChatGPT upload helper (single file)\n"
+                f"- Upload doc: `{single_doc}`\n"
+            )
+        else:
+            # Legacy grouped bundles + manifest
+            if bundle_artifacts:
+                lines: List[str] = []
+                manifest = bundle_artifacts.get("manifest")
+                if manifest:
+                    lines.append(f"- Grouped manifest: `{manifest}`")
+                for k in ("CORE", "DOCS_TOOLS", "TESTS_OTHERS"):
+                    if k in bundle_artifacts:
+                        lines.append(f"- Bundle {k}: `{bundle_artifacts[k]}`")
+                if lines:
+                    upload_helpers_block = "\n## Upload-helper bundles (legacy)\n" + "\n".join(lines) + "\n"
+
+        fmt = (self.output_format or "").strip().lower()
+        if fmt == "xml":
+            format_notes = "- Use `<file_index>` then search for `<file path=\"...\">`.\n"
+        else:
+            format_notes = (
+                "- Use `==== FILE_INDEX ====` first (lines starting with `ENTRY`).\n"
+                "- Then jump to `----- FILE BEGIN -----` with matching `path=\"...\"`.\n"
+                "- For big files, prefer `--- CHUNK BEGIN ---` blocks.\n"
+            )
+
+        text = f"""# START HERE — Instructions for AI
+
+You are given a repository codedump split into multiple volume files.
+
+## Goal
+Answer questions by opening the minimum necessary content.
+
+## Format notes
+{format_notes}
+{smartignore_block}
+## How to navigate this dump
+{next_step}2) Pick the relevant volume file.
+3) Use the per-volume index section to locate the path.
+4) Read the exact file content (or required chunks only).
+5) Expand cautiously (imports / calls / routes), 1–2 hops unless needed.
+
+## Rules
+- Do NOT try to read the entire dump.
+- Prefer docs/diagrams/indices if present.
+- When answering, cite file paths and the volume filename.
+
+## Files
+- Instructions (this): `{self.instructions_filename}`
+- Master index: `{index_filename or "(not generated)"}`
+- Volumes:
+{volumes_list}
+{upload_helpers_block}
+"""
+        with out_path.open("w", encoding="utf-8") as f:
+            f.write(text)
+
+        self.log(f"-> Created Instructions File: {self.instructions_filename}")
+----- FILE END -----
+
+----- FILE BEGIN -----
+path="worker/smartignore.py"
+id=e4b851dc684e
+kind=source
+size=6586
+lines=181
+chunks=0
+----
+# worker/smartignore.py
+from __future__ import annotations
+
+import fnmatch
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Callable, List, Set
+
+
+@dataclass
+class SmartIgnore:
+    """
+    Minimal .smartignore support (intentionally simple/predictable):
+      - ignores blank lines and comments (#...)
+      - NO negation support
+      - patterns are glob-like (fnmatch)
+      - trailing "/" means "directory-only"
+      - leading "/" anchors to repo root
+      - patterns without "/" match basename only
+      - patterns with "/" may match full path OR any suffix segment ("match anywhere-ish")
+
+    Also supports optional "matched paths index" generation:
+      - records all matched paths (files + dirs) and matched dirs
+      - can write SmartignorePathsIndex.txt into output_dir
+    """
+
+    root_dir: Path
+    log: Callable[[str], None]
+
+    use_smartignore_exclude: bool = False
+    create_smartignore_paths_index: bool = False
+
+    smartignore_filename: str = ".smartignore"
+    patterns: List[str] = field(default_factory=list)
+
+    matched_paths: Set[str] = field(default_factory=set)
+    matched_dirs: Set[str] = field(default_factory=set)
+
+    @property
+    def smartignore_file(self) -> Path:
+        return (self.root_dir / self.smartignore_filename).resolve()
+
+    def load(self) -> None:
+        """Load patterns from repo_root/.smartignore and reset match tracking."""
+        self.patterns.clear()
+        self.matched_paths.clear()
+        self.matched_dirs.clear()
+
+        p = self.smartignore_file
+        if not p.exists():
+            return
+
+        try:
+            raw_lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+            for line in raw_lines:
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                # minimal: no negation support; keep predictable
+                self.patterns.append(s)
+        except Exception as e:
+            self.log(f"(warn) Could not read {self.smartignore_filename}: {e}")
+
+    def rel_posix(self, path: Path) -> str:
+        """Best-effort: path relative to root_dir as posix; fallback to absolute posix."""
+        try:
+            return path.resolve().relative_to(self.root_dir.resolve()).as_posix()
+        except Exception:
+            try:
+                return path.resolve().as_posix()
+            except Exception:
+                return str(path).replace("\\", "/")
+
+    def _record_match(self, rel_posix: str, is_dir: bool) -> None:
+        if not self.create_smartignore_paths_index:
+            return
+        self.matched_paths.add(rel_posix)
+        if is_dir:
+            self.matched_dirs.add(rel_posix)
+
+    def match(self, rel_posix: str, *, is_dir: bool) -> bool:
+        """
+        Returns True if rel_posix matches any smartignore pattern.
+        rel_posix MUST be a posix-style relative path (e.g. "src/app/main.py").
+        """
+        if not self.patterns:
+            return False
+
+        path = rel_posix
+        base = path.rsplit("/", 1)[-1]
+
+        for pat_raw in self.patterns:
+            pat = pat_raw.strip()
+            if not pat:
+                continue
+
+            # directory-only
+            if pat.endswith("/"):
+                pat = pat[:-1].strip()
+                if not pat:
+                    continue
+                if not is_dir:
+                    continue
+
+            # anchored
+            if pat.startswith("/"):
+                pat2 = pat[1:]
+                if fnmatch.fnmatch(path, pat2):
+                    self._record_match(rel_posix, is_dir=is_dir)
+                    return True
+                continue
+
+            # basename-only
+            if "/" not in pat:
+                if fnmatch.fnmatch(base, pat):
+                    self._record_match(rel_posix, is_dir=is_dir)
+                    return True
+                continue
+
+            # direct path match
+            if fnmatch.fnmatch(path, pat):
+                self._record_match(rel_posix, is_dir=is_dir)
+                return True
+
+            # "match anywhere": try matching against suffixes by segment boundary
+            parts = path.split("/")
+            for i in range(1, len(parts)):
+                suffix = "/".join(parts[i:])
+                if fnmatch.fnmatch(suffix, pat):
+                    self._record_match(rel_posix, is_dir=is_dir)
+                    return True
+
+        return False
+
+    def should_exclude(self, rel_posix: str, *, is_dir: bool) -> bool:
+        """
+        Returns True iff the path matches AND use_smartignore_exclude is enabled.
+        (Always records matches if create_smartignore_paths_index is enabled.)
+        """
+        m = self.match(rel_posix, is_dir=is_dir)
+        return bool(m and self.use_smartignore_exclude)
+
+    def write_paths_index(
+        self,
+        *,
+        output_dir: Path,
+        check_stop: Callable[[], None],
+    ) -> None:
+        """Write SmartignorePathsIndex.txt in output_dir (if enabled)."""
+        if not self.create_smartignore_paths_index:
+            return
+
+        check_stop()
+        out_path = (output_dir / "SmartignorePathsIndex.txt").resolve()
+
+        try:
+            with out_path.open("w", encoding="utf-8", errors="replace") as f:
+                f.write("==== SMARTIGNORE PATHS INDEX ====\n")
+                f.write(f"generated_at: {datetime.now().isoformat()}\n")
+                f.write(f"repo_root: {self.root_dir}\n")
+                f.write(f"smartignore_file: {self.smartignore_file}\n")
+                f.write(f"patterns_count: {len(self.patterns)}\n")
+                f.write(f"matched_paths_count: {len(self.matched_paths)}\n")
+                f.write(f"matched_dirs_count: {len(self.matched_dirs)}\n\n")
+
+                f.write("==== PATTERNS (.smartignore) ====\n")
+                for p in self.patterns:
+                    f.write(p + "\n")
+
+                f.write("\n==== MATCHED DIRECTORIES ====\n")
+                for p in sorted(self.matched_dirs):
+                    f.write(p + "\n")
+
+                f.write("\n==== MATCHED PATHS (FILES + DIRS) ====\n")
+                for p in sorted(self.matched_paths):
+                    f.write(p + "\n")
+
+            self.log("-> Created SmartignorePathsIndex.txt")
+        except Exception as e:
+            self.log(f"(warn) Could not write SmartignorePathsIndex.txt: {e}")
+----- FILE END -----
+
+----- FILE BEGIN -----
+path="worker/writers_text.py"
+id=c9afc7cc02be
+kind=source
+size=7174
+lines=172
+chunks=0
+----
+# smart_wiki_dumper/worker/writers_text.py
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+
+class WritersTextMixin:
+    """
+    TEXT writer extracted from DumpWorker.
+
+    Requires the host class to provide:
+      - self.root_dir: Path
+      - self.output_dir: Path
+      - self.log: callable(str) -> None
+      - methods:
+          * check_stop() -> None
+          * _process_file_content(f: Path) -> Optional[Dict[str, Any]]
+    """
+
+    def _collect_file_data_parallel(
+        self,
+        files: List[Path],
+        log_prefix_filename: str,
+    ) -> Tuple[List[Dict[str, Any]], float]:
+        """
+        Collect per-file metadata+content (or chunks) using the host's _process_file_content.
+        """
+        import concurrent.futures
+
+        total_size = 0
+        self.log(f"-> Processing {log_prefix_filename} ({len(files)} files)...")
+
+        max_workers = min(50, len(files) + 1)
+        file_data_list: List[Dict[str, Any]] = []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            results = executor.map(self._process_file_content, files)
+            for res in results:
+                self.check_stop()
+                if not res:
+                    continue
+                file_data_list.append(res)
+                total_size += int(res.get("size_bytes", 0) or 0)
+
+        size_mb = total_size / (1024 * 1024)
+        return file_data_list, size_mb
+
+    def write_volume_text(self, filename: str, files: List[Path], title: str, nav_context: dict) -> Optional[dict]:
+        """
+        Writes a structured plain-text "volume" file.
+
+        Returns a meta dict (same shape as the monolith) or None on failure.
+        """
+        if not files:
+            return None
+        self.check_stop()
+
+        out_path = self.output_dir / filename
+
+        try:
+            files.sort(key=lambda p: p.relative_to(self.root_dir).as_posix().lower())
+        except Exception:
+            files.sort(key=lambda p: p.name.lower())
+
+        file_data_list, size_mb = self._collect_file_data_parallel(files, filename)
+
+        try:
+            self.log("    Writing TEXT to disk...")
+            with out_path.open("w", encoding="utf-8", errors="replace") as out:
+                out.write("==== VOLUME META ====\n")
+                out.write(f"generated_at: {datetime.now().isoformat()}\n")
+                out.write(f"title: {title}\n")
+                out.write(f"root_dir: {self.root_dir}\n")
+                out.write(f"file_count: {len(files)}\n")
+                out.write(f"total_size_mb: {round(size_mb, 4)}\n")
+                if nav_context.get("home_file"):
+                    out.write(f"home: {nav_context['home_file']}\n")
+                if nav_context.get("prev_file"):
+                    out.write(f"prev_volume: {nav_context['prev_file']}\n")
+                if nav_context.get("next_file"):
+                    out.write(f"next_volume: {nav_context['next_file']}\n")
+                out.write(f"prev_title: {nav_context.get('prev_title','')}\n")
+                out.write(f"next_title: {nav_context.get('next_title','')}\n")
+                out.write(f"short_title: {nav_context.get('short_title','')}\n")
+
+                out.write("\n==== FILE_INDEX ====\n")
+                for f_data in file_data_list:
+                    self.check_stop()
+                    rel_path = str(f_data.get("rel_path", ""))
+                    kind = str(f_data.get("kind", ""))
+                    size_bytes = int(f_data.get("size_bytes", 0) or 0)
+                    line_count = int(f_data.get("line_count", 0) or 0)
+                    file_id = str(f_data.get("file_id", ""))
+
+                    chunks = f_data.get("chunks") or []
+                    chunks_count = len(chunks) if isinstance(chunks, list) else 0
+
+                    out.write(
+                        "ENTRY "
+                        f"id={file_id} "
+                        f'path="{rel_path}" '
+                        f"kind={kind} "
+                        f"size={size_bytes} "
+                        f"lines={line_count} "
+                        f"chunks={chunks_count}\n"
+                    )
+
+                out.write("\n==== FILES ====\n")
+                for f_data in file_data_list:
+                    self.check_stop()
+                    rel_path = str(f_data.get("rel_path", ""))
+                    kind = str(f_data.get("kind", ""))
+                    size_bytes = int(f_data.get("size_bytes", 0) or 0)
+                    line_count = int(f_data.get("line_count", 0) or 0)
+                    file_id = str(f_data.get("file_id", ""))
+
+                    chunks = f_data.get("chunks") or []
+                    chunks = chunks if isinstance(chunks, list) else []
+
+                    out.write(
+                        "\n----- FILE BEGIN -----\n"
+                        f'path="{rel_path}"\n'
+                        f"id={file_id}\n"
+                        f"kind={kind}\n"
+                        f"size={size_bytes}\n"
+                        f"lines={line_count}\n"
+                        f"chunks={len(chunks)}\n"
+                    )
+
+                    if chunks:
+                        for c in chunks:
+                            self.check_stop()
+                            cid = str(c.get("id", ""))
+                            sline = int(c.get("start_line", 0) or 0)
+                            eline = int(c.get("end_line", 0) or 0)
+                            text = str(c.get("text", ""))
+
+                            out.write(
+                                "\n--- CHUNK BEGIN ---\n"
+                                f"id={cid}\n"
+                                f"start={sline}\n"
+                                f"end={eline}\n"
+                                "----\n"
+                            )
+                            out.write(text)
+                            if text and not text.endswith("\n"):
+                                out.write("\n")
+                            out.write("--- CHUNK END ---\n")
+                    else:
+                        content = str(f_data.get("content", "") or "")
+                        out.write("----\n")
+                        out.write(content)
+                        if content and not content.endswith("\n"):
+                            out.write("\n")
+
+                    out.write("----- FILE END -----\n")
+
+            contained_files = [str(entry.get("rel_path", "")) for entry in file_data_list if entry.get("rel_path")]
+            return {
+                "filename": filename,
+                "title": title,
+                "size_mb": size_mb,
+                "file_count": len(files),
+                "short_title": nav_context.get("short_title", title),
+                "contained_files": contained_files,
+            }
+
+        except Exception as e:
+            self.log(f"Error writing TEXT file {filename}: {e}")
+            return None
+----- FILE END -----
+
+----- FILE BEGIN -----
+path="worker/writers_xml.py"
+id=42886533b414
+kind=source
+size=8187
+lines=216
+chunks=0
+----
+# worker/writers_xml.py
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
+
+from ..xml_utils import escape_xml_attr, escape_xml_text, wrap_cdata
+
+
+@dataclass(frozen=True)
+class XmlWriterConfig:
+    """
+    XML writer options.
+
+    txt_mode:
+      - "none": write .xml only
+      - "copy": write .xml plus .xml.txt companion copies
+      - "only": write .xml.txt only (no .xml)
+    """
+
+    txt_mode: str = "copy"  # "none" | "copy" | "only"
+
+
+def index_filename_xml(txt_mode: str) -> str:
+    if (txt_mode or "").strip().lower() == "only":
+        return "Index.xml.txt"
+    return "Index.xml"
+
+
+def normalize_volume_filename_xml(name: str, txt_mode: str) -> str:
+    """
+    Input base naming uses .xml convention; normalize to final extension.
+    If txt_mode == "only" => returns .xml.txt, else returns .xml.
+    """
+    base = name
+    for suf in (".xml.txt", ".xml", ".txt", ".md"):
+        if base.lower().endswith(suf):
+            base = base[: -len(suf)]
+            break
+
+    txt_mode_norm = (txt_mode or "copy").strip().lower()
+    fname = base + ".xml"
+    if txt_mode_norm == "only":
+        return fname + ".txt"
+    return fname
+
+
+def _txt_companion_path(p: Path) -> Path:
+    return p.with_suffix(p.suffix + ".txt")
+
+
+def maybe_write_txt_companion(
+    *,
+    src_xml_path: Path,
+    txt_mode: str,
+    log: Callable[[str], None],
+    check_stop: Callable[[], None],
+) -> None:
+    """
+    If txt_mode == "copy", create an identical .xml.txt companion next to .xml.
+    """
+    if (txt_mode or "").strip().lower() != "copy":
+        return
+
+    try:
+        check_stop()
+        dst = _txt_companion_path(src_xml_path)
+        with src_xml_path.open("rb") as rf, dst.open("wb") as wf:
+            while True:
+                check_stop()
+                chunk = rf.read(1024 * 1024)
+                if not chunk:
+                    break
+                wf.write(chunk)
+        log(f"    -> Wrote companion: {dst.name}")
+    except Exception as e:
+        log(f"    (warn) Could not write txt companion for {src_xml_path.name}: {e}")
+
+
+def bundle_extension_xml() -> str:
+    # upload-helper artifacts (bundles/single-doc) are text files containing XML payload
+    return ".xml.txt"
+
+
+def upload_helper_extension_xml() -> str:
+    """
+    Extension for upload-helper outputs in XML workflow.
+    Always '.xml.txt' (even if txt_mode == 'none') because the helper is a text artifact.
+    """
+    return ".xml.txt"
+
+
+def normalize_upload_helper_filename_xml(name: str) -> str:
+    """
+    Normalize any base name to the upload-helper extension '.xml.txt'.
+    """
+    base = (name or "").strip()
+    for suf in (".xml.txt", ".xml", ".txt", ".md"):
+        if base.lower().endswith(suf):
+            base = base[: -len(suf)]
+            break
+    return base + upload_helper_extension_xml()
+
+
+def write_volume_xml(
+    *,
+    output_dir: Path,
+    root_dir: Path,
+    filename: str,
+    files: List[Path],
+    title: str,
+    nav_context: Dict[str, Any],
+    file_data_list: List[Dict[str, Any]],
+    size_mb: float,
+    txt_mode: str,
+    log: Callable[[str], None],
+    check_stop: Callable[[], None],
+) -> Optional[dict]:
+    """
+    Writes an XML volume and returns meta (same shape as legacy worker.py).
+    Expects file_data_list already prepared (incl chunks/content/kind/file_id).
+    """
+    if not files:
+        return None
+
+    check_stop()
+    out_path = (output_dir / filename).resolve()
+
+    try:
+        log("    Writing XML to disk...")
+        # When txt_mode == "only", we still write to `out_path` which is expected to be ".xml.txt"
+        with out_path.open("w", encoding="utf-8") as out:
+            out.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+            out.write("<volume>\n")
+
+            out.write("  <meta>\n")
+            out.write(f"    <generated_at>{datetime.now().isoformat()}</generated_at>\n")
+            out.write(f"    <title>{escape_xml_text(title)}</title>\n")
+            out.write(f"    <root_dir>{escape_xml_text(str(root_dir))}</root_dir>\n")
+            out.write(f"    <file_count>{len(files)}</file_count>\n")
+            out.write(f"    <total_size_mb>{round(size_mb, 4)}</total_size_mb>\n")
+
+            if nav_context.get("home_file"):
+                out.write(f'    <home>{escape_xml_text(nav_context["home_file"])}</home>\n')
+            if nav_context.get("next_file"):
+                out.write(f'    <next_volume>{escape_xml_text(nav_context["next_file"])}</next_volume>\n')
+            if nav_context.get("prev_file"):
+                out.write(f'    <prev_volume>{escape_xml_text(nav_context["prev_file"])}</prev_volume>\n')
+
+            out.write(f'    <prev_title>{escape_xml_text(nav_context.get("prev_title", ""))}</prev_title>\n')
+            out.write(f'    <next_title>{escape_xml_text(nav_context.get("next_title", ""))}</next_title>\n')
+            out.write(f'    <short_title>{escape_xml_text(nav_context.get("short_title", ""))}</short_title>\n')
+            out.write("  </meta>\n")
+
+            out.write("  <file_index>\n")
+            for f_data in file_data_list:
+                p = escape_xml_attr(f_data["rel_path"])
+                k = escape_xml_attr(f_data["kind"])
+                fid = escape_xml_attr(f_data.get("file_id", ""))
+                chunks_count = len(f_data["chunks"]) if f_data.get("chunks") else 0
+                out.write(
+                    f'    <entry id="{fid}" path="{p}" kind="{k}" '
+                    f'size="{f_data["size_bytes"]}" lines="{f_data["line_count"]}" '
+                    f'chunks="{chunks_count}" />\n'
+                )
+            out.write("  </file_index>\n")
+
+            out.write("  <files>\n")
+            for f_data in file_data_list:
+                path_attr = escape_xml_attr(f_data["rel_path"])
+                kind_attr = escape_xml_attr(f_data["kind"])
+                file_id_attr = escape_xml_attr(f_data.get("file_id", ""))
+
+                if f_data.get("chunks"):
+                    out.write(
+                        f'    <file id="{file_id_attr}" path="{path_attr}" size="{f_data["size_bytes"]}" '
+                        f'lines="{f_data["line_count"]}" kind="{kind_attr}">\n'
+                    )
+                    for c in f_data["chunks"]:
+                        cid = escape_xml_attr(c["id"])
+                        sline = int(c["start_line"])
+                        eline = int(c["end_line"])
+                        out.write(
+                            f'      <chunk id="{cid}" start="{sline}" end="{eline}">{wrap_cdata(c["text"])}</chunk>\n'
+                        )
+                    out.write("    </file>\n")
+                else:
+                    out.write(
+                        f'    <file id="{file_id_attr}" path="{path_attr}" size="{f_data["size_bytes"]}" '
+                        f'lines="{f_data["line_count"]}" kind="{kind_attr}">{wrap_cdata(f_data["content"])}</file>\n'
+                    )
+
+            out.write("  </files>\n")
+            out.write("</volume>\n")
+
+        # Companion behavior:
+        # - If we wrote a real .xml and txt_mode=="copy", also create .xml.txt copy.
+        # - If txt_mode=="only", out_path is already .xml.txt and no companion is needed.
+        if (txt_mode or "").strip().lower() == "copy" and out_path.suffix.lower() == ".xml":
+            maybe_write_txt_companion(src_xml_path=out_path, txt_mode=txt_mode, log=log, check_stop=check_stop)
+
+        contained_files = [entry["rel_path"] for entry in file_data_list]
+        return {
+            "filename": filename,
+            "title": title,
+            "size_mb": size_mb,
+            "file_count": len(files),
+            "short_title": nav_context.get("short_title", title),
+            "contained_files": contained_files,
+        }
+
+    except Exception as e:
+        log(f"Error writing XML file {filename}: {e}")
+        return None
+----- FILE END -----

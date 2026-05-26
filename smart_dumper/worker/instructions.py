@@ -25,6 +25,9 @@ class InstructionsWriter:
     log: Callable[[str], None]
     ask_overwrite: Callable[[str], bool]
 
+    # AI Navigation
+    ai_navigation: bool = True
+
     def write(
         self,
         *,
@@ -51,7 +54,12 @@ class InstructionsWriter:
         if not should_write:
             return
 
-        volumes_list = "\n".join([f"- {m.get('filename','')}  —  {m.get('title','')}" for m in generated_meta])
+        volumes_list = "\n".join(
+            [f"- {m.get('filename','')}  —  {m.get('title','')}" for m in generated_meta]
+        )
+
+        has_file_entries = any(bool(m.get("file_entries")) for m in generated_meta)
+        ai_navigation_enabled = bool(self.ai_navigation or has_file_entries)
 
         # Navigation first-step
         if upload_doc_filename:
@@ -59,7 +67,7 @@ class InstructionsWriter:
                 f"1) Open `{upload_doc_filename}` (single combined upload doc) and search for the path you need.\n"
             )
             if index_filename:
-                next_step += f"   (Optional) Use `{index_filename}` to locate the relevant volume faster.\n"
+                next_step += f"   Optional: use `{index_filename}` to locate the relevant volume faster.\n"
         else:
             if index_filename:
                 next_step = f"1) Open `{index_filename}` (master index) and use it to locate the right volume.\n"
@@ -73,7 +81,7 @@ class InstructionsWriter:
                 f"- Found `{self.smartignore_file.name}` with {len(self.smartignore_patterns)} pattern(s).\n"
                 f"- Exclusion enabled: {self.use_smartignore_exclude}\n"
                 f"- Smartignore index enabled: {self.create_smartignore_paths_index}\n"
-                f"- Smartignore paths index file: `SmartignorePathsIndex.txt` (if enabled)\n"
+                f"- Smartignore paths index file: `SmartignorePathsIndex.txt` if enabled.\n"
             )
 
         upload_helpers_block = ""
@@ -81,7 +89,7 @@ class InstructionsWriter:
         # Prefer explicit single-doc arg
         single_doc = upload_doc_filename
 
-        # Fallback: allow passing it through bundle_artifacts (for convenience)
+        # Fallback: allow passing it through bundle_artifacts for convenience
         if not single_doc and bundle_artifacts:
             for k in ("upload_doc", "single_upload_doc", "single", "doc"):
                 v = bundle_artifacts.get(k)
@@ -91,8 +99,8 @@ class InstructionsWriter:
 
         if single_doc:
             upload_helpers_block = (
-                "\n## ChatGPT upload helper (single file)\n"
-                f"- Upload doc: `{single_doc}`\n"
+                "\n## ChatGPT upload helper\n"
+                f"- Single upload doc: `{single_doc}`\n"
             )
         else:
             # Legacy grouped bundles + manifest
@@ -105,41 +113,76 @@ class InstructionsWriter:
                     if k in bundle_artifacts:
                         lines.append(f"- Bundle {k}: `{bundle_artifacts[k]}`")
                 if lines:
-                    upload_helpers_block = "\n## Upload-helper bundles (legacy)\n" + "\n".join(lines) + "\n"
+                    upload_helpers_block = "\n## Upload-helper bundles\n" + "\n".join(lines) + "\n"
 
         fmt = (self.output_format or "").strip().lower()
         if fmt == "xml":
-            format_notes = "- Use `<file_index>` then search for `<file path=\"...\">`.\n"
+            format_notes = (
+                "- Use the master index first when available.\n"
+                "- In XML volumes, use `<file_index>` to locate candidate files.\n"
+                "- Then search for `<file path=\"...\">`.\n"
+                "- For large files, prefer `<chunk start=\"...\" end=\"...\">` ranges.\n"
+            )
         else:
             format_notes = (
-                "- Use `==== FILE_INDEX ====` first (lines starting with `ENTRY`).\n"
+                "- Use `==== FILE_INDEX ====` first in each volume.\n"
+                "- Search for `ENTRY` lines to locate file metadata quickly.\n"
                 "- Then jump to `----- FILE BEGIN -----` with matching `path=\"...\"`.\n"
-                "- For big files, prefer `--- CHUNK BEGIN ---` blocks.\n"
+                "- For large files, prefer `--- CHUNK BEGIN ---` blocks.\n"
             )
+
+        ai_navigation_block = ""
+        if ai_navigation_enabled:
+            ai_navigation_block = """
+## AI navigation features
+
+When available, use these sections before reading full files:
+
+- `FILE DETAIL INDEX`: find exact file metadata, volume, line range, chunk ranges, and summary.
+- `SYMBOL INDEX`: locate classes, functions, and methods directly.
+- `IMPORT INDEX`: inspect dependencies before expanding to related files.
+- `PATCH TARGETS`: identify likely files to modify for common change types.
+- `line_ref`: full line range for a file.
+- `chunk_refs`: smaller line ranges for large files.
+
+Navigation rule:
+
+1. Start from the master index if present.
+2. Use `SYMBOL INDEX` when looking for a class, function, or method.
+3. Use `IMPORT INDEX` when tracing dependencies.
+4. Use `FILE DETAIL INDEX` to choose the smallest relevant file or chunk range.
+5. Read only the needed file or chunk content.
+"""
 
         text = f"""# START HERE — Instructions for AI
 
 You are given a repository codedump split into multiple volume files.
 
 ## Goal
+
 Answer questions by opening the minimum necessary content.
 
 ## Format notes
-{format_notes}
-{smartignore_block}
+
+{format_notes}{smartignore_block}{ai_navigation_block}
 ## How to navigate this dump
+
 {next_step}2) Pick the relevant volume file.
 3) Use the per-volume index section to locate the path.
-4) Read the exact file content (or required chunks only).
-5) Expand cautiously (imports / calls / routes), 1–2 hops unless needed.
+4) Read the exact file content or required chunks only.
+5) Expand cautiously through imports, calls, or routes, 1–2 hops unless needed.
 
 ## Rules
+
 - Do NOT try to read the entire dump.
-- Prefer docs/diagrams/indices if present.
+- Prefer the master index, file indexes, summaries, and chunk references before opening full files.
+- Prefer docs, diagrams, and generated indexes when present.
 - When answering, cite file paths and the volume filename.
+- Preserve clean source content when copying code; ignore physically numbered lines unless line citations are needed.
 
 ## Files
-- Instructions (this): `{self.instructions_filename}`
+
+- Instructions this file: `{self.instructions_filename}`
 - Master index: `{index_filename or "(not generated)"}`
 - Volumes:
 {volumes_list}

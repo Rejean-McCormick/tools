@@ -1,0 +1,567 @@
+Voici un **plan d’update complet pour l’app Smart Dumper**.
+
+## Objectif
+
+Ajouter un mode **AI Navigation** qui améliore les dumps pour ChatGPT :
+
+```text
+- références de lignes
+- références de chunks
+- index des classes/fonctions
+- index des imports
+- résumés courts par fichier
+- patch targets
+- optionnel : lignes physiquement numérotées
+```
+
+L’index actuel ne donne que `path -> volume`, donc l’amélioration principale consiste à enrichir ce master index avec des métadonnées plus précises.  Les volumes ont déjà `lines` et `chunks`, donc on peut étendre ce format sans casser la structure existante. 
+
+---
+
+# Plan d’update
+
+## Phase 1 — Ajouter les options globales
+
+### Fichier à modifier
+
+```text
+constants.py
+```
+
+### Modifs
+
+Ajouter :
+
+```python
+DEFAULT_AI_LINE_REFERENCES = True
+DEFAULT_NUMBER_SOURCE_LINES = False
+DEFAULT_SYMBOL_INDEX = True
+DEFAULT_IMPORT_INDEX = True
+DEFAULT_FILE_SUMMARIES = True
+DEFAULT_PATCH_TARGETS = True
+LINE_NUMBER_WIDTH = 6
+```
+
+### But
+
+Centraliser les nouveaux defaults comme le code le fait déjà pour `DEFAULT_TXT_MODE`, `DEFAULT_CREATE_SINGLE_UPLOAD_DOC`, `CHUNK_MAX_LINES`, etc. 
+
+---
+
+## Phase 2 — Créer le module d’introspection
+
+### Nouveau fichier
+
+```text
+worker/code_introspection.py
+```
+
+### Fonctions à créer
+
+```python
+number_lines(text, width=6)
+extract_python_symbols(content)
+extract_python_imports(content)
+summarize_file(rel_path, symbols, imports, kind)
+build_chunk_refs(chunks, line_count)
+build_file_entry(file_data, volume_filename)
+build_patch_targets(generated_meta)
+```
+
+### Détails
+
+Utiliser `ast` pour analyser les fichiers `.py`.
+
+Sortie attendue pour les symboles :
+
+```python
+{
+    "type": "class",
+    "name": "DumpWorker",
+    "qualname": "DumpWorker",
+    "line": 27,
+    "end_line": 526
+}
+```
+
+Sortie attendue pour les imports :
+
+```python
+{
+    "module": "pathlib",
+    "name": "Path",
+    "alias": "",
+    "line": 5
+}
+```
+
+---
+
+## Phase 3 — Enrichir les métadonnées par fichier
+
+### Fichier à modifier
+
+```text
+worker/file_processing.py
+```
+
+### Pourquoi
+
+`FileProcessor.process_file_content()` retourne déjà les métadonnées principales : `rel_path`, `ext`, `size_bytes`, `line_count`, `kind`, `file_id`, `chunks`, `content`. C’est donc le bon endroit pour ajouter `symbols`, `imports`, `summary`, `line_ref`, `chunk_refs`. 
+
+### Modifs
+
+Ajouter à la dataclass :
+
+```python
+ai_line_references: bool = True
+number_source_lines: bool = False
+symbol_index: bool = True
+import_index: bool = True
+file_summaries: bool = True
+line_number_width: int = 6
+```
+
+Ajouter dans le dict retourné :
+
+```python
+"line_ref": "1-526",
+"chunk_refs": "1-350,351-526",
+"symbols": [...],
+"imports": [...],
+"summary": "...",
+"numbered_content": "...",
+```
+
+### Règle importante
+
+Ne pas remplacer `content` par `numbered_content`.
+
+Garder :
+
+```python
+content = code propre
+numbered_content = version annotée
+```
+
+Comme ça, le dump reste copiable sans numéros si nécessaire.
+
+---
+
+## Phase 4 — Enrichir les volumes texte
+
+### Fichier à modifier
+
+```text
+worker/writers_text.py
+```
+
+### Pourquoi
+
+Ce fichier écrit les volumes texte, incluant `FILE_INDEX`, `FILE BEGIN`, les chunks et le contenu. 
+
+### Modifs dans `FILE_INDEX`
+
+Passer de :
+
+```text
+ENTRY id=... path="worker/dump_worker.py" kind=source size=21482 lines=526 chunks=2
+```
+
+à :
+
+```text
+ENTRY id=... path="worker/dump_worker.py" kind=source size=21482 lines=526 line_ref=1-526 chunks=2 chunk_refs=1-350,351-526 symbols=12 imports=9 summary="Orchestrates repository dumps"
+```
+
+### Modifs dans chaque `FILE BEGIN`
+
+Ajouter :
+
+```text
+line_ref=1-526
+chunk_refs=1-350,351-526
+summary="Orchestrates repository dumps"
+```
+
+Puis :
+
+```text
+--- SYMBOLS ---
+class DumpWorker line=27 end_line=526
+def run line=279 end_line=526
+
+--- IMPORTS ---
+import os line=4
+from pathlib import Path line=6
+from .index import IndexWriterMixin line=18
+```
+
+### Modif du return
+
+Retourner un nouveau champ :
+
+```python
+"file_entries": [...]
+```
+
+Garder aussi :
+
+```python
+"contained_files": [...]
+```
+
+pour compatibilité avec l’ancien code.
+
+---
+
+## Phase 5 — Enrichir les volumes XML
+
+### Fichier à modifier
+
+```text
+worker/writers_xml.py
+```
+
+### Modifs
+
+Ajouter dans chaque `<file>` :
+
+```xml
+<file
+  path="worker/dump_worker.py"
+  id="5d8b3d641544"
+  kind="source"
+  size="21482"
+  lines="526"
+  line_ref="1-526"
+  chunk_refs="1-350,351-526">
+```
+
+Ajouter :
+
+```xml
+<summary>Orchestrates repository dumps.</summary>
+
+<symbols>
+  <symbol type="class" name="DumpWorker" line="27" end_line="526" />
+  <symbol type="def" name="run" line="279" end_line="526" />
+</symbols>
+
+<imports>
+  <import module="pathlib" name="Path" line="6" />
+</imports>
+```
+
+Retourner aussi `file_entries`, comme dans `writers_text.py`.
+
+---
+
+## Phase 6 — Enrichir le master index
+
+### Fichier à modifier
+
+```text
+worker/index.py
+```
+
+### Pourquoi
+
+L’index actuel contient les volumes et une section `FILE LOCATOR (path -> volume)`, mais pas les lignes, chunks, symboles ou imports. 
+
+### Garder l’ancien format
+
+Conserver :
+
+```text
+==== FILE LOCATOR (path -> volume) ====
+worker/dump_worker.py    volume=smart_dumper_..._02_worker.txt
+```
+
+### Ajouter `FILE DETAIL INDEX`
+
+```text
+==== FILE DETAIL INDEX ====
+worker/dump_worker.py
+  volume=smart_dumper_20260518_144408_02_worker.txt
+  id=5d8b3d641544
+  kind=source
+  lines=526
+  line_ref=1-526
+  chunk_refs=1-350,351-526
+  symbols=12
+  imports=9
+  summary=Orchestrates repository dumps
+```
+
+### Ajouter `SYMBOL INDEX`
+
+```text
+==== SYMBOL INDEX ====
+class DumpWorker    path=worker/dump_worker.py    volume=...    line=27    end_line=526
+def run             path=worker/dump_worker.py    volume=...    line=279   end_line=526
+```
+
+### Ajouter `IMPORT INDEX`
+
+```text
+==== IMPORT INDEX ====
+worker/dump_worker.py    from pathlib import Path    line=6
+worker/dump_worker.py    from .index import IndexWriterMixin    line=18
+```
+
+### Ajouter `PATCH TARGETS`
+
+```text
+==== PATCH TARGETS ====
+GUI options                  path=gui.py
+Worker orchestration         path=worker/dump_worker.py
+Per-file metadata            path=worker/file_processing.py
+Text output format           path=worker/writers_text.py
+XML output format            path=worker/writers_xml.py
+Master index format          path=worker/index.py
+Generated AI instructions    path=worker/instructions.py
+Defaults/constants           path=constants.py
+```
+
+---
+
+## Phase 7 — Brancher les options dans le worker
+
+### Fichier à modifier
+
+```text
+worker/dump_worker.py
+```
+
+### Pourquoi
+
+`DumpWorker` orchestre déjà les options de format, l’index, l’upload helper, `.smartignore`, les writers et le `FileProcessor`. 
+
+### Modifs
+
+Ajouter au constructeur :
+
+```python
+ai_line_references: bool = True,
+number_source_lines: bool = False,
+symbol_index: bool = True,
+import_index: bool = True,
+file_summaries: bool = True,
+patch_targets: bool = True,
+```
+
+Stocker :
+
+```python
+self.ai_line_references = bool(ai_line_references)
+self.number_source_lines = bool(number_source_lines)
+self.symbol_index = bool(symbol_index)
+self.import_index = bool(import_index)
+self.file_summaries = bool(file_summaries)
+self.patch_targets = bool(patch_targets)
+```
+
+Passer au `FileProcessor` :
+
+```python
+self.file_processor = FileProcessor(
+    ...
+    ai_line_references=self.ai_line_references,
+    number_source_lines=self.number_source_lines,
+    symbol_index=self.symbol_index,
+    import_index=self.import_index,
+    file_summaries=self.file_summaries,
+)
+```
+
+Passer au `InstructionsWriter`.
+
+---
+
+## Phase 8 — Ajouter les options dans le GUI
+
+### Fichier à modifier
+
+```text
+gui.py
+```
+
+### Pourquoi
+
+Le GUI crée déjà les options, les lit, puis les passe à `DumpWorker` via `run_process()`. 
+
+### Ajouter un bloc
+
+```text
+AI Navigation
+[x] Add AI line references
+[ ] Number source lines
+[x] Create symbol index
+[x] Create import index
+[x] Create file summaries
+[x] Create patch targets
+```
+
+### Ajouter les variables
+
+```python
+self.var_ai_line_refs = tk.BooleanVar(value=DEFAULT_AI_LINE_REFERENCES)
+self.var_number_source_lines = tk.BooleanVar(value=DEFAULT_NUMBER_SOURCE_LINES)
+self.var_symbol_index = tk.BooleanVar(value=DEFAULT_SYMBOL_INDEX)
+self.var_import_index = tk.BooleanVar(value=DEFAULT_IMPORT_INDEX)
+self.var_file_summaries = tk.BooleanVar(value=DEFAULT_FILE_SUMMARIES)
+self.var_patch_targets = tk.BooleanVar(value=DEFAULT_PATCH_TARGETS)
+```
+
+### Passer à `run_process()`
+
+Ajouter ces valeurs aux args du thread, puis à `DumpWorker`.
+
+---
+
+## Phase 9 — Mettre à jour les instructions générées
+
+### Fichier à modifier
+
+```text
+worker/instructions.py
+```
+
+### Pourquoi
+
+Le fichier `00_START_HERE.instructions.md` dit déjà à l’IA d’utiliser l’index, les volumes et les chunks. Il faut maintenant lui expliquer les nouvelles sections. 
+
+### Ajouter dans le fichier généré
+
+```markdown
+## AI navigation features
+
+- Use `FILE DETAIL INDEX` to find exact file ranges.
+- Use `SYMBOL INDEX` to locate classes/functions.
+- Use `IMPORT INDEX` before expanding dependencies.
+- Use `line_ref` and `chunk_refs` to read only the required range.
+- Use `PATCH TARGETS` to identify likely files to modify.
+```
+
+---
+
+# Ordre d’implémentation recommandé
+
+```text
+1. constants.py
+2. worker/code_introspection.py
+3. worker/file_processing.py
+4. worker/writers_text.py
+5. worker/index.py
+6. worker/dump_worker.py
+7. gui.py
+8. worker/instructions.py
+9. worker/writers_xml.py
+```
+
+Je mettrais `writers_xml.py` en dernier parce que le mode texte est le format par défaut et le plus utile pour tester rapidement.
+
+---
+
+# Tests à faire
+
+## Test 1 — Dump texte standard
+
+Paramètres :
+
+```text
+output_format = text
+AI line references = on
+Number source lines = off
+Symbol index = on
+Import index = on
+Summaries = on
+Patch targets = on
+```
+
+Vérifier que :
+
+```text
+Index.txt contient FILE DETAIL INDEX
+Index.txt contient SYMBOL INDEX
+Index.txt contient IMPORT INDEX
+Index.txt contient PATCH TARGETS
+Les volumes contiennent line_ref et chunk_refs
+Le code reste copiable sans numéros
+```
+
+## Test 2 — Lignes numérotées
+
+Paramètres :
+
+```text
+Number source lines = on
+```
+
+Vérifier que le contenu affiche :
+
+```text
+000001 | from __future__ import annotations
+000002 | import os
+```
+
+Mais que les métadonnées conservent aussi la version propre ou non transformée.
+
+## Test 3 — Gros fichier avec chunks
+
+Vérifier :
+
+```text
+line_ref=1-526
+chunk_refs=1-350,351-526
+```
+
+Le dump actuel a déjà des fichiers chunkés comme `worker/dump_worker.py`, donc c’est un bon cas de test. 
+
+## Test 4 — Mode XML
+
+Paramètres :
+
+```text
+output_format = xml
+txt_mode = copy / only / none
+```
+
+Vérifier que :
+
+```text
+Index.xml contient les nouvelles sections
+Les volumes XML contiennent summary/symbols/imports
+Le .xml.txt companion fonctionne encore si txt_mode=copy
+```
+
+## Test 5 — Compatibilité
+
+Vérifier que les anciens champs restent présents :
+
+```text
+contained_files
+FILE_INDEX
+FILE LOCATOR
+chunks
+lines
+```
+
+Important pour ne pas casser `worker/bundles.py`, qui utilise encore `contained_files` pour les manifests/grouped bundles. 
+
+---
+
+# Critères d’acceptation
+
+L’update est réussie si un dump généré permet de répondre vite à ces questions sans lire tout le repo :
+
+```text
+Où est la classe DumpWorker?
+Quels fichiers importent worker/index.py?
+Quelles fonctions sont dans worker/file_processing.py?
+Quel chunk contient DumpWorker.run?
+Quels fichiers modifier pour changer le format du master index?
+```
+
+Le résultat attendu : **moins de lecture inutile, citations plus précises, meilleure navigation, et patchs plus rapides**.

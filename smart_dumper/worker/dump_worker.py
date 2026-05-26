@@ -10,7 +10,14 @@ from typing import Any, Callable, Dict, List, Optional
 from ..constants import (
     ALWAYS_IGNORE_DIRS,
     CHUNK_MAX_LINES,
+    DEFAULT_AI_NAVIGATION,
+    DEFAULT_CREATE_FILE_SUMMARIES,
+    DEFAULT_CREATE_IMPORT_INDEX,
+    DEFAULT_CREATE_PATCH_TARGETS,
+    DEFAULT_CREATE_SYMBOL_INDEX,
+    DEFAULT_NUMBER_SOURCE_LINES,
     INSTRUCTIONS_FILENAME,
+    LINE_NUMBER_WIDTH,
     OVERSIZE_BYTES,
     UPLOAD_HELPER_DOC_PREFIX,
 )
@@ -47,6 +54,12 @@ class DumpWorker(FileCollectionMixin, WritersTextMixin, IndexWriterMixin):
     Upload helper:
       - create_single_upload_doc=True => one combined file: "Code_snapshot_<repo_folder><ext>"
       - create_grouped_bundles=True  => legacy grouped bundles + manifest
+
+    AI navigation:
+      - ai_navigation=True adds line/chunk metadata for faster AI lookup
+      - create_symbol_index/create_import_index/create_file_summaries control rich per-file metadata
+      - create_patch_targets controls master-index patch target hints
+      - number_source_lines optionally writes a numbered source variant
     """
 
     def __init__(
@@ -73,6 +86,14 @@ class DumpWorker(FileCollectionMixin, WritersTextMixin, IndexWriterMixin):
         # .smartignore options
         use_smartignore_exclude: bool = False,
         create_smartignore_paths_index: bool = False,
+        # AI navigation options
+        ai_navigation: bool = DEFAULT_AI_NAVIGATION,
+        number_source_lines: bool = DEFAULT_NUMBER_SOURCE_LINES,
+        create_symbol_index: bool = DEFAULT_CREATE_SYMBOL_INDEX,
+        create_import_index: bool = DEFAULT_CREATE_IMPORT_INDEX,
+        create_file_summaries: bool = DEFAULT_CREATE_FILE_SUMMARIES,
+        create_patch_targets: bool = DEFAULT_CREATE_PATCH_TARGETS,
+        line_number_width: int = LINE_NUMBER_WIDTH,
     ):
         self.root_dir = Path(root_dir).resolve()
         self.output_dir = Path(output_dir).resolve()
@@ -122,6 +143,15 @@ class DumpWorker(FileCollectionMixin, WritersTextMixin, IndexWriterMixin):
             or UPLOAD_HELPER_DOC_PREFIX
         )
 
+        # AI navigation
+        self.ai_navigation = bool(ai_navigation)
+        self.number_source_lines = bool(number_source_lines)
+        self.create_symbol_index = bool(create_symbol_index)
+        self.create_import_index = bool(create_import_index)
+        self.create_file_summaries = bool(create_file_summaries)
+        self.create_patch_targets = bool(create_patch_targets)
+        self.line_number_width = int(line_number_width)
+
         # .smartignore
         self.use_smartignore_exclude = bool(use_smartignore_exclude)
         self.create_smartignore_paths_index = bool(create_smartignore_paths_index)
@@ -158,6 +188,12 @@ class DumpWorker(FileCollectionMixin, WritersTextMixin, IndexWriterMixin):
             exclusion_mode_getter=lambda: self.exclusion_mode,
             get_file_size=self.get_file_size,
             check_stop=self.check_stop,
+            ai_navigation=self.ai_navigation,
+            number_source_lines=self.number_source_lines,
+            create_symbol_index=self.create_symbol_index,
+            create_import_index=self.create_import_index,
+            create_file_summaries=self.create_file_summaries,
+            line_number_width=self.line_number_width,
         )
 
     # -----------------------------
@@ -477,6 +513,7 @@ class DumpWorker(FileCollectionMixin, WritersTextMixin, IndexWriterMixin):
                     instructions_filename,
                     generated_meta,
                     upload_helper_file=upload_helper_file_for_index,
+                    create_patch_targets=self.create_patch_targets,
                 )
 
             # smartignore index file (paths matched)

@@ -13,10 +13,14 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Optional
 
 try:
+    from .constants import DEFAULT_AI_NAVIGATION
     from .constants import DEFAULT_CREATE_SINGLE_UPLOAD_DOC as _DEFAULT_CREATE_UPLOAD_DOC
+    from .constants import DEFAULT_NUMBER_SOURCE_LINES
     from .constants import DEFAULT_TXT_MODE
 except Exception:
+    DEFAULT_AI_NAVIGATION = True
     _DEFAULT_CREATE_UPLOAD_DOC = False
+    DEFAULT_NUMBER_SOURCE_LINES = False
     DEFAULT_TXT_MODE = "copy"
 
 from .worker import DumpWorker
@@ -29,7 +33,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Smart Dumper")
-        self.geometry("600x1020")
+        self.geometry("600x1080")
 
         self.last_output_dir: Optional[str] = None
         self.log_queue: "queue.Queue[str]" = queue.Queue()
@@ -164,6 +168,25 @@ class App(tk.Tk):
             smart_frame,
             text="Create index of paths matched by .smartignore (SmartignorePathsIndex.txt)",
             variable=self.var_smartignore_index,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=10, pady=(4, 0))
+
+        # --- AI Navigation ---
+        ai_frame = tk.LabelFrame(self, text="AI Navigation", padx=10, pady=10)
+        ai_frame.pack(fill="x", **pad_opts)
+
+        self.var_ai_navigation = tk.BooleanVar(value=DEFAULT_AI_NAVIGATION)
+        self.var_number_source_lines = tk.BooleanVar(value=DEFAULT_NUMBER_SOURCE_LINES)
+
+        tk.Checkbutton(
+            ai_frame,
+            text="Add AI navigation metadata",
+            variable=self.var_ai_navigation,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=10)
+
+        tk.Checkbutton(
+            ai_frame,
+            text="Physically number source lines",
+            variable=self.var_number_source_lines,
         ).grid(row=1, column=0, columnspan=2, sticky="w", padx=10, pady=(4, 0))
 
         # --- Single combined upload file ---
@@ -380,6 +403,9 @@ class App(tk.Tk):
         use_smartignore_exclude = bool(self.var_use_smartignore_exclude.get())
         smartignore_index = bool(self.var_smartignore_index.get())
 
+        ai_navigation = bool(self.var_ai_navigation.get())
+        number_source_lines = bool(self.var_number_source_lines.get())
+
         self.last_output_dir = None
         self.btn_open_dest.config(state="disabled")
         self.btn_run.config(state="disabled", text="Running...")
@@ -403,6 +429,8 @@ class App(tk.Tk):
                 create_chatgpt_doc,
                 use_smartignore_exclude,
                 smartignore_index,
+                ai_navigation,
+                number_source_lines,
             ),
             daemon=True,
         )
@@ -423,6 +451,8 @@ class App(tk.Tk):
         create_chatgpt_doc: bool,
         use_smartignore_exclude: bool,
         smartignore_index: bool,
+        ai_navigation: bool,
+        number_source_lines: bool,
     ):
         worker = DumpWorker(
             repo,
@@ -442,6 +472,8 @@ class App(tk.Tk):
             upload_doc_prefix=CHATGPT_UPLOAD_DOC_PREFIX,
             use_smartignore_exclude=use_smartignore_exclude,
             create_smartignore_paths_index=smartignore_index,
+            ai_navigation=ai_navigation,
+            number_source_lines=number_source_lines,
         )
         worker.run()
 

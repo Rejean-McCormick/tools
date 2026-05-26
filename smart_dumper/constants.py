@@ -102,6 +102,27 @@ INDEX_FILENAME_XML: str = "Index.xml"
 INDEX_FILENAME: str = INDEX_FILENAME_TEXT
 
 # -----------------------------
+# AI navigation defaults
+# -----------------------------
+
+# Main AI-navigation switch. When enabled, dumps include richer metadata for
+# precise file/chunk/symbol/import navigation.
+DEFAULT_AI_NAVIGATION: bool = True
+
+# Optional physical line numbering in emitted source content.
+# Keep disabled by default so dumped code remains clean and directly copyable.
+DEFAULT_NUMBER_SOURCE_LINES: bool = False
+
+# Advanced AI-navigation subfeatures.
+DEFAULT_CREATE_SYMBOL_INDEX: bool = True
+DEFAULT_CREATE_IMPORT_INDEX: bool = True
+DEFAULT_CREATE_FILE_SUMMARIES: bool = True
+DEFAULT_CREATE_PATCH_TARGETS: bool = True
+
+# Width used when DEFAULT_NUMBER_SOURCE_LINES is enabled.
+LINE_NUMBER_WIDTH: int = 6
+
+# -----------------------------
 # ChatGPT Upload Helper (single doc)
 # -----------------------------
 # Goal: 1 file that regroups everything, named: "Code_snapshot_" + <repo folder name>
