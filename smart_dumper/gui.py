@@ -33,7 +33,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Smart Dumper")
-        self.geometry("600x1080")
+        self.geometry("600x1120")
 
         self.last_output_dir: Optional[str] = None
         self.log_queue: "queue.Queue[str]" = queue.Queue()
@@ -147,6 +147,7 @@ class App(tk.Tk):
             values=(
                 "text (structured .txt) [default]",
                 "xml (.xml)",
+                "zip (.zip archive)",
             ),
         )
         self.combo_output_format.grid(row=0, column=1, sticky="w", padx=5)
@@ -208,13 +209,17 @@ class App(tk.Tk):
         )
         self.combo_txt_mode.grid(row=0, column=1, sticky="w", padx=5)
 
-        # Single upload doc: Code_snapshot_<repo-folder-name><ext>
+        # Single upload artifact: Code_snapshot_<repo-folder-name><ext>
         self.var_create_chatgpt_doc = tk.BooleanVar(value=_DEFAULT_CREATE_UPLOAD_DOC)
-        tk.Checkbutton(
+        self.chk_create_chatgpt_doc = tk.Checkbutton(
             chatgpt_frame,
-            text=f'Create single upload document: "{CHATGPT_UPLOAD_DOC_PREFIX}<repo-folder-name>"',
+            text=f'Create single upload artifact: "{CHATGPT_UPLOAD_DOC_PREFIX}<repo-folder-name>"',
             variable=self.var_create_chatgpt_doc,
-        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=10, pady=(6, 0))
+        )
+        self.chk_create_chatgpt_doc.grid(row=1, column=0, columnspan=2, sticky="w", padx=10, pady=(6, 0))
+
+        self._pre_zip_create_chatgpt_doc = bool(_DEFAULT_CREATE_UPLOAD_DOC)
+        self._last_output_format_value: Optional[str] = None
 
         self.combo_output_format.bind("<<ComboboxSelected>>", lambda _e: self._sync_controls())
         self._sync_controls()
@@ -265,14 +270,30 @@ class App(tk.Tk):
         raw = (self.var_output_format.get() or "").lower().strip()
         if raw.startswith("xml"):
             return "xml"
+        if raw.startswith("zip"):
+            return "zip"
         return "text"
 
     def _sync_controls(self):
         fmt = self._resolve_output_format()
+        prev = getattr(self, "_last_output_format_value", None)
+
         if fmt == "xml":
             self.combo_txt_mode.config(state="readonly")
         else:
             self.combo_txt_mode.config(state="disabled")
+
+        if fmt == "zip":
+            if prev != "zip":
+                self._pre_zip_create_chatgpt_doc = bool(self.var_create_chatgpt_doc.get())
+            self.var_create_chatgpt_doc.set(True)
+            self.chk_create_chatgpt_doc.config(state="disabled")
+        else:
+            if prev == "zip":
+                self.var_create_chatgpt_doc.set(bool(getattr(self, "_pre_zip_create_chatgpt_doc", _DEFAULT_CREATE_UPLOAD_DOC)))
+            self.chk_create_chatgpt_doc.config(state="normal")
+
+        self._last_output_format_value = fmt
 
     def report_callback_exception(self, exc, val, tb):
         tb_text = "".join(traceback.format_exception(exc, val, tb))
@@ -395,10 +416,12 @@ class App(tk.Tk):
 
         custom_excludes_paths = [Path(e.get().strip()) for e in self.exclusion_entries if e.get().strip()]
 
-        output_format = self._resolve_output_format()
+        selected_output_format = self._resolve_output_format()
+        worker_output_format = "text" if selected_output_format == "zip" else selected_output_format
         txt_mode = self._resolve_txt_mode()
 
-        create_chatgpt_doc = bool(self.var_create_chatgpt_doc.get())
+        create_chatgpt_doc = bool(self.var_create_chatgpt_doc.get()) or selected_output_format == "zip"
+        single_upload_artifact_format = "zip" if selected_output_format == "zip" else "txt"
 
         use_smartignore_exclude = bool(self.var_use_smartignore_exclude.get())
         smartignore_index = bool(self.var_smartignore_index.get())
@@ -424,9 +447,10 @@ class App(tk.Tk):
                 self.var_create_index.get(),
                 custom_excludes_paths,
                 self.var_exclude_mode.get(),
-                output_format,
+                worker_output_format,
                 txt_mode,
                 create_chatgpt_doc,
+                single_upload_artifact_format,
                 use_smartignore_exclude,
                 smartignore_index,
                 ai_navigation,
@@ -449,6 +473,7 @@ class App(tk.Tk):
         output_format: str,
         txt_mode: str,
         create_chatgpt_doc: bool,
+        single_upload_artifact_format: str,
         use_smartignore_exclude: bool,
         smartignore_index: bool,
         ai_navigation: bool,
@@ -470,6 +495,7 @@ class App(tk.Tk):
             txt_mode=txt_mode,
             create_single_upload_doc=create_chatgpt_doc,
             upload_doc_prefix=CHATGPT_UPLOAD_DOC_PREFIX,
+            single_upload_artifact_format=single_upload_artifact_format,
             use_smartignore_exclude=use_smartignore_exclude,
             create_smartignore_paths_index=smartignore_index,
             ai_navigation=ai_navigation,

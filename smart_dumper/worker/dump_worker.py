@@ -45,6 +45,7 @@ class DumpWorker(FileCollectionMixin, WritersTextMixin, IndexWriterMixin):
     Output formats:
       - output_format="text": structured plain-text volumes (DEFAULT)
       - output_format="xml" : XML volumes (optional)
+      - output_format="zip" : shortcut for a single .zip upload artifact over text volumes
 
     XML txt_mode:
       - "none": .xml only
@@ -52,7 +53,7 @@ class DumpWorker(FileCollectionMixin, WritersTextMixin, IndexWriterMixin):
       - "only": .xml.txt only (no .xml)
 
     Upload helper:
-      - create_single_upload_doc=True => one combined file: "Code_snapshot_<repo_folder><ext>"
+      - create_single_upload_doc=True => one upload helper: "Code_snapshot_<repo_folder><ext|.zip>"
       - create_grouped_bundles=True  => legacy grouped bundles + manifest
 
     AI navigation:
@@ -83,6 +84,7 @@ class DumpWorker(FileCollectionMixin, WritersTextMixin, IndexWriterMixin):
         # Preferred option (single combined upload helper doc)
         create_single_upload_doc: Optional[bool] = None,
         upload_doc_prefix: str = UPLOAD_HELPER_DOC_PREFIX,
+        single_upload_artifact_format: str = "txt",
         # .smartignore options
         use_smartignore_exclude: bool = False,
         create_smartignore_paths_index: bool = False,
@@ -119,7 +121,9 @@ class DumpWorker(FileCollectionMixin, WritersTextMixin, IndexWriterMixin):
         self.oversize_bytes = int(OVERSIZE_BYTES)
 
         # output format
-        self.output_format = (output_format or "text").strip().lower()
+        requested_output_format = (output_format or "text").strip().lower()
+        force_single_upload_zip = requested_output_format == "zip"
+        self.output_format = "text" if force_single_upload_zip else requested_output_format
         if self.output_format not in ("text", "xml"):
             self.output_format = "text"
 
@@ -138,10 +142,18 @@ class DumpWorker(FileCollectionMixin, WritersTextMixin, IndexWriterMixin):
             self.create_single_upload_doc = bool(create_single_upload_doc)
             self.create_grouped_bundles = bool(create_grouped_bundles)
 
+        if force_single_upload_zip:
+            self.create_single_upload_doc = True
+
         self.upload_doc_prefix = (
             (upload_doc_prefix or UPLOAD_HELPER_DOC_PREFIX).strip()
             or UPLOAD_HELPER_DOC_PREFIX
         )
+        self.single_upload_artifact_format = (single_upload_artifact_format or "txt").strip().lower()
+        if force_single_upload_zip:
+            self.single_upload_artifact_format = "zip"
+        if self.single_upload_artifact_format not in ("txt", "zip"):
+            self.single_upload_artifact_format = "txt"
 
         # AI navigation
         self.ai_navigation = bool(ai_navigation)
@@ -495,10 +507,11 @@ class DumpWorker(FileCollectionMixin, WritersTextMixin, IndexWriterMixin):
                     create_single_upload_doc=self.create_single_upload_doc,
                     repo_root=self.root_dir,
                     upload_doc_prefix=self.upload_doc_prefix,
+                    single_upload_artifact_format=self.single_upload_artifact_format,
                 )
                 bundle_artifacts = bw.write_upload_helper_artifacts(generated_meta) or {}
 
-                upload_doc_filename = bundle_artifacts.get("single")
+                upload_doc_filename = bundle_artifacts.get("single") or bundle_artifacts.get("single_zip")
                 if upload_doc_filename:
                     upload_helper_file_for_index = upload_doc_filename
                 else:

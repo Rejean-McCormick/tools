@@ -63,9 +63,17 @@ class InstructionsWriter:
 
         # Navigation first-step
         if upload_doc_filename:
-            next_step = (
-                f"1) Open `{upload_doc_filename}` (single combined upload doc) and search for the path you need.\n"
-            )
+            is_zip_helper = str(upload_doc_filename).lower().endswith(".zip")
+            helper_label = "single upload archive" if is_zip_helper else "single combined upload doc"
+            if is_zip_helper:
+                next_step = (
+                    f"1) Open `{upload_doc_filename}` ({helper_label}), then use `ZIP_MANIFEST.md` "
+                    "or the extracted volume files to search for the path you need.\n"
+                )
+            else:
+                next_step = (
+                    f"1) Open `{upload_doc_filename}` ({helper_label}) and search for the path you need.\n"
+                )
             if index_filename:
                 next_step += f"   Optional: use `{index_filename}` to locate the relevant volume faster.\n"
         else:
@@ -98,9 +106,10 @@ class InstructionsWriter:
                     break
 
         if single_doc:
+            label = "Single upload archive" if str(single_doc).lower().endswith(".zip") else "Single upload doc"
             upload_helpers_block = (
                 "\n## ChatGPT upload helper\n"
-                f"- Single upload doc: `{single_doc}`\n"
+                f"- {label}: `{single_doc}`\n"
             )
         else:
             # Legacy grouped bundles + manifest

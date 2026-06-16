@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from ..constants import UPLOAD_HELPER_DOC_PREFIX
 
@@ -26,11 +27,17 @@ class BundleWriter:
     create_single_upload_doc: bool = False
     repo_root: Optional[Path] = None  # used to compute repo folder name for "Code_snapshot_<repo>"
     upload_doc_prefix: str = UPLOAD_HELPER_DOC_PREFIX
+    single_upload_artifact_format: str = "txt"  # "txt" or "zip"
 
     def bundle_extension(self) -> str:
         if (self.output_format or "").strip().lower() == "xml":
             return ".xml.txt"
         return ".txt"
+
+    def single_upload_extension(self) -> str:
+        if (self.single_upload_artifact_format or "").strip().lower() == "zip":
+            return ".zip"
+        return self.bundle_extension()
 
     def _sanitize_filename_component(self, s: str) -> str:
         if not s:
@@ -58,7 +65,7 @@ class BundleWriter:
             or UPLOAD_HELPER_DOC_PREFIX
         )
         repo_name = self._sanitize_filename_component(repo_name)
-        return f"{prefix}{repo_name}{self.bundle_extension()}"
+        return f"{prefix}{repo_name}{self.single_upload_extension()}"
 
     def classify_volume_group(self, meta: dict) -> str:
         s = " ".join(
@@ -77,9 +84,14 @@ class BundleWriter:
 
     def write_upload_helper_artifacts(self, generated_meta: List[dict]) -> Dict[str, str]:
         """
-        Preferred entrypoint: returns either {"single": "<Code_snapshot_Repo.txt>"} OR legacy grouped artifacts.
+        Preferred entrypoint: returns either {"single": "<Code_snapshot_Repo.txt>"},
+        {"single_zip": "<Code_snapshot_Repo.zip>"}, or legacy grouped artifacts.
         """
         if self.create_single_upload_doc:
+            if (self.single_upload_artifact_format or "").strip().lower() == "zip":
+                out_name = self.write_single_upload_zip(generated_meta)
+                return {"single_zip": out_name} if out_name else {}
+
             out_name = self.write_single_upload_doc(generated_meta)
             return {"single": out_name} if out_name else {}
         return self.write_grouped_bundles(generated_meta)
@@ -171,6 +183,87 @@ class BundleWriter:
             self.log(f"    (warn) Could not create manifest {manifest_name}: {e}")
 
         return artifacts
+
+    def write_single_upload_zip(
+        self,
+        generated_meta: List[dict],
+        *,
+        out_name: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        Writes ONE upload-helper archive instead of one concatenated text document.
+
+        The archive contains the generated volume files at the archive root and a
+        small manifest that lists what was included. This preserves the original
+        per-volume files instead of flattening them into one large .txt/.xml.txt.
+
+        Naming default: "Code_snapshot_<repo_folder_name>.zip".
+
+        Returns the filename on success, else None.
+        """
+        if not generated_meta:
+            return None
+
+        self.check_stop()
+
+        final_name = out_name or self.default_single_doc_name()
+        if not final_name.lower().endswith(".zip"):
+            final_name = f"{Path(final_name).stem}.zip"
+
+        out_path = self.output_dir / final_name
+        included: List[str] = []
+
+        try:
+            with ZipFile(out_path, "w", compression=ZIP_DEFLATED) as zf:
+                manifest_lines = [
+                    "# Single upload archive",
+                    "",
+                    f"- generated_at: {datetime.now().isoformat()}",
+                    f"- output_format: {(self.output_format or '').strip().lower() or 'text'}",
+                    f"- volumes: {len([m for m in generated_meta if m.get('filename')])}",
+                    "",
+                    "## Files in this archive",
+                ]
+
+                for m in generated_meta:
+                    self.check_stop()
+                    filename = str(m.get("filename") or "")
+                    if not filename:
+                        continue
+
+                    vol_file = self.output_dir / filename
+                    if not vol_file.exists() or not vol_file.is_file():
+                        self.log(f"    (warn) Missing volume skipped in zip: {filename}")
+                        continue
+
+                    zf.write(vol_file, arcname=filename)
+                    included.append(filename)
+                    manifest_lines.append(f"- `{filename}` — {m.get('title', '')}")
+
+                manifest_lines.extend([
+                    "",
+                    "## File locator index (path → volume)",
+                    "",
+                    "```text",
+                ])
+                for m in generated_meta:
+                    self.check_stop()
+                    vol = str(m.get("filename") or "")
+                    if not vol:
+                        continue
+                    for rel_path in m.get("contained_files", []) or []:
+                        self.check_stop()
+                        manifest_lines.append(f"{rel_path}\tvolume={vol}")
+                manifest_lines.append("```")
+
+                manifest_text = "\n".join(manifest_lines).rstrip() + "\n"
+                zf.writestr("ZIP_MANIFEST.md", manifest_text)
+
+            self.log(f"    -> Created single upload zip: {final_name} ({len(included)} volume file(s))")
+            return final_name
+        except Exception as e:
+            self.log(f"    (warn) Could not create single upload zip {final_name}: {e}")
+            return None
 
     def write_single_upload_doc(
         self,
