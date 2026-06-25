@@ -30,29 +30,80 @@ def get_file_list():
     return resolved_files
 
 def open_in_npp():
-    """Opens all valid files from the input list in Notepad++."""
-    files_to_open = get_file_list()
-    
-    if not files_to_open:
+    """Opens valid files in Notepad++ and can optionally create missing files."""
+    requested_files = get_file_list()
+
+    if not requested_files:
         messagebox.showwarning("Input Error", "Please enter at least one file path.")
         return
 
     npp_path = r"C:\Program Files\Notepad++\notepad++.exe"
-    
+
     if not os.path.exists(npp_path):
         messagebox.showerror("Error", f"Notepad++ not found at:\n{npp_path}")
         return
 
-    existing_files = [f for f in files_to_open if os.path.isfile(f)]
-    
-    if not existing_files:
+    existing_files = [f for f in requested_files if os.path.isfile(f)]
+    folders = [f for f in requested_files if os.path.isdir(f)]
+    missing_files = [f for f in requested_files if not os.path.exists(f)]
+
+    created_files = []
+    creation_errors = []
+
+    # This option applies only to "Open in Notepad++".
+    # "Process Paths" keeps its original behavior and never creates files.
+    if create_missing_var.get() and missing_files:
+        warning = (
+            "The following files do not exist:\n\n"
+            + "\n".join(missing_files)
+            + "\n\nCreate these files as empty files before opening in Notepad++?"
+        )
+        if messagebox.askyesno("Confirm file creation", warning):
+            for file_path in missing_files:
+                try:
+                    parent_dir = os.path.dirname(file_path)
+                    if parent_dir and not os.path.isdir(parent_dir):
+                        os.makedirs(parent_dir, exist_ok=True)
+
+                    with open(file_path, "a", encoding="utf-8"):
+                        pass
+
+                    if os.path.isfile(file_path):
+                        created_files.append(file_path)
+                except Exception as e:
+                    creation_errors.append(f"{file_path} -> {e}")
+
+            if creation_errors:
+                messagebox.showerror(
+                    "File creation error",
+                    "Some files could not be created:\n\n" + "\n".join(creation_errors)
+                )
+        else:
+            status_label.config(
+                text="Creation cancelled. Opening existing files only.",
+                fg="orange"
+            )
+
+    files_to_open = [f for f in requested_files if os.path.isfile(f)]
+
+    if not files_to_open:
         status_label.config(text="No valid files found to open.", fg="red")
         return
 
     try:
-        cmd = [npp_path] + existing_files
+        cmd = [npp_path] + files_to_open
         subprocess.Popen(cmd)
-        status_label.config(text=f"Opened {len(existing_files)} files in Notepad++", fg="green")
+
+        details = [f"Opened {len(files_to_open)} files in Notepad++"]
+        if created_files:
+            details.append(f"created {len(created_files)} missing files")
+        skipped_count = len(missing_files) - len(created_files)
+        if skipped_count:
+            details.append(f"skipped {skipped_count} missing files")
+        if folders:
+            details.append(f"skipped {len(folders)} folders")
+
+        status_label.config(text=". ".join(details) + ".", fg="green")
     except Exception as e:
         messagebox.showerror("Execution Error", str(e))
 
@@ -169,6 +220,9 @@ root = tk.Tk()
 root.title("File Content Aggregator")
 root.geometry("850x750") # Slightly wider to accommodate new button
 
+# Option unchecked by default: create missing files only when opening in Notepad++
+create_missing_var = tk.BooleanVar(value=False)
+
 # 1. Input Area (Top)
 input_frame = tk.LabelFrame(root, text="File Selection", padx=10, pady=10)
 input_frame.pack(fill=tk.BOTH, expand=False, padx=10, pady=5)
@@ -201,6 +255,13 @@ process_btn.pack(side=tk.LEFT, padx=(0, 5))
 
 npp_btn = tk.Button(btn_frame, text="Open in Notepad++", command=open_in_npp, bg="#fffacd", height=2, width=18)
 npp_btn.pack(side=tk.LEFT, padx=5)
+
+create_missing_check = tk.Checkbutton(
+    btn_frame,
+    text="Create missing files",
+    variable=create_missing_var
+)
+create_missing_check.pack(side=tk.LEFT, padx=5)
 
 clear_btn = tk.Button(btn_frame, text="Clear Input", command=clear_input, height=2)
 clear_btn.pack(side=tk.LEFT, padx=5)
